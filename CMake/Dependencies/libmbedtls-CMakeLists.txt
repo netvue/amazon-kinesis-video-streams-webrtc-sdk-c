@@ -16,6 +16,8 @@ else()
   set(CMAKE_MACOSX_RPATH 0)
 endif()
 
+set(EX_C_FLAGS "-Wno-implicit-function-declaration -Wno-error=type-limits")
+
 ExternalProject_Add(
   project_libmbedtls
   # TODO: needs to replace this with official mbedTLS branch
@@ -29,5 +31,8 @@ ExternalProject_Add(
     -DUSE_SHARED_MBEDTLS_LIBRARY=${BUILD_SHARED}
     -DCMAKE_BUILD_TYPE=Release
     -DCMAKE_MACOSX_RPATH=${CMAKE_MACOSX_RPATH}
+    -DCMAKE_C_FLAGS=${EX_C_FLAGS}
+    -DLINK_WITH_PTHREAD=ON
+    -DENABLE_PROGRAMS=OFF
   BUILD_ALWAYS    TRUE
   TEST_COMMAND    "")

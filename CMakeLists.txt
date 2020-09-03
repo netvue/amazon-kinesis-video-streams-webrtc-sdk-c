@@ -251,6 +251,7 @@ target_link_libraries(
   kvsWebrtcClient
   PRIVATE kvspicUtils
           kvspicState
+          m
           ${CMAKE_THREAD_LIBS_INIT}
           ${OPENSSL_SSL_LIBRARY}
           ${OPENSSL_CRYPTO_LIBRARY}
