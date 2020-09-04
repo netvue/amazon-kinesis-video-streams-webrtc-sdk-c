@@ -22,6 +22,7 @@ extern "C" {
 #define SAMPLE_CHANNEL_NAME     (PCHAR) "ScaryTestChannel"
 
 #define SAMPLE_AUDIO_FRAME_DURATION (20 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND)
+#define SAMPLE_STATS_DURATION       (60 * HUNDREDS_OF_NANOS_IN_A_SECOND)
 #define SAMPLE_VIDEO_FRAME_DURATION (HUNDREDS_OF_NANOS_IN_A_SECOND / DEFAULT_FPS_VALUE)
 
 #define ASYNC_ICE_CONFIG_INFO_WAIT_TIMEOUT (3 * HUNDREDS_OF_NANOS_IN_A_SECOND)
@@ -31,6 +32,10 @@ extern "C" {
 
 #define FILE_LOGGING_BUFFER_SIZE (100 * 1024)
 #define MAX_NUMBER_OF_LOG_FILES  5
+
+#define SAMPLE_HASH_TABLE_BUCKET_COUNT  50
+#define SAMPLE_HASH_TABLE_BUCKET_LENGTH 2
+
 typedef enum {
     SAMPLE_STREAMING_VIDEO_ONLY,
     SAMPLE_STREAMING_AUDIO_VIDEO,
@@ -40,12 +45,19 @@ typedef struct __SampleStreamingSession SampleStreamingSession;
 typedef struct __SampleStreamingSession* PSampleStreamingSession;
 
 typedef struct {
+    UINT64 prevNumberOfPacketsSent;
+    UINT64 prevNumberOfPacketsReceived;
+    UINT64 prevNumberOfBytesSent;
+    UINT64 prevNumberOfBytesReceived;
+    UINT64 prevPacketsDiscardedOnSend;
+    UINT64 prevTs;
+} RtcMetricsHistory, *PRtcMetricsHistory;
+
+typedef struct {
     volatile ATOMIC_BOOL appTerminateFlag;
     volatile ATOMIC_BOOL interrupted;
     volatile ATOMIC_BOOL mediaThreadStarted;
-    volatile ATOMIC_BOOL updatingSampleStreamingSessionList;
     volatile ATOMIC_BOOL recreateSignalingClient;
-    volatile SIZE_T streamingSessionListReadingThreadCount;
     BOOL useTestSrc;
     ChannelInfo channelInfo;
     PCHAR pCaCertPath;
@@ -57,11 +69,17 @@ typedef struct {
     UINT32 videoBufferSize;
     TID videoSenderTid;
     TID audioSenderTid;
+    TIMER_QUEUE_HANDLE timerQueueHandle;
+    UINT32 iceCandidatePairStatsTimerId;
     SampleStreamingMediaType mediaType;
     startRoutine audioSource;
     startRoutine videoSource;
     startRoutine receiveAudioVideoSource;
     RtcOnDataChannel onDataChannel;
+
+    TID signalingProcessor;
+    PHashTable pPendingSignalingMessageForRemoteClient;
+    PHashTable pRtcPeerConnectionForRemoteClient;
 
     MUTEX sampleConfigurationObjLock;
     CVAR cvar;
@@ -71,9 +89,11 @@ typedef struct {
     UINT64 customData;
     PSampleStreamingSession sampleStreamingSessionList[DEFAULT_MAX_CONCURRENT_STREAMING_SESSION];
     UINT32 streamingSessionCount;
+    MUTEX streamingSessionListReadLock;
     UINT32 iceUriCount;
     SignalingClientCallbacks signalingClientCallbacks;
     SignalingClientInfo clientInfo;
+    RtcStats rtcIceCandidatePairMetrics;
 } SampleConfiguration, *PSampleConfiguration;
 
 typedef VOID (*StreamSessionShutdownCallback)(UINT64, PSampleStreamingSession);
@@ -82,7 +102,6 @@ struct __SampleStreamingSession {
     volatile ATOMIC_BOOL terminateFlag;
     volatile ATOMIC_BOOL candidateGatheringDone;
     volatile ATOMIC_BOOL peerIdReceived;
-    volatile ATOMIC_BOOL sdpOfferAnswerExchanged;
     volatile SIZE_T frameIndex;
     PRtcPeerConnection pPeerConnection;
     PRtcRtpTransceiver pVideoRtcRtpTransceiver;
@@ -93,7 +112,11 @@ struct __SampleStreamingSession {
     UINT32 videoTimestamp;
     CHAR peerId[MAX_SIGNALING_CLIENT_ID_LEN + 1];
     TID receiveAudioVideoSenderTid;
-    UINT64 firstSdpMsgReceiveTime;
+    UINT64 offerReceiveTime;
+    UINT64 startUpLatency;
+    BOOL firstFrame;
+    RtcMetricsHistory rtcMetricsHistory;
+    BOOL remoteCanTrickleIce;
 
     // this is called when the SampleStreamingSession is being freed
     StreamSessionShutdownCallback shutdownCallback;
@@ -105,12 +128,13 @@ STATUS readFrameFromDisk(PBYTE, PUINT32, PCHAR);
 PVOID sendVideoPackets(PVOID);
 PVOID sendAudioPackets(PVOID);
 PVOID sendGstreamerAudioVideo(PVOID);
-PVOID sampleReceiveAudioFrame(PVOID args);
+PVOID sampleReceiveVideoFrame(PVOID args);
+PVOID getPeriodicIceCandidatePairStats(PVOID);
+STATUS getIceCandidatePairStatsCallback(UINT32 timerId, UINT64 currentTime, UINT64 customData);
 STATUS createSampleConfiguration(PCHAR, SIGNALING_CHANNEL_ROLE_TYPE, BOOL, BOOL, PSampleConfiguration*);
 STATUS freeSampleConfiguration(PSampleConfiguration*);
-STATUS viewerMessageReceived(UINT64, PReceivedSignalingMessage);
 STATUS signalingClientStateChanged(UINT64, SIGNALING_CLIENT_STATE);
-STATUS masterMessageReceived(UINT64, PReceivedSignalingMessage);
+STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pReceivedSignalingMessage);
 STATUS handleAnswer(PSampleConfiguration, PSampleStreamingSession, PSignalingMessage);
 STATUS handleOffer(PSampleConfiguration, PSampleStreamingSession, PSignalingMessage);
 STATUS handleRemoteCandidate(PSampleStreamingSession, PSignalingMessage);
@@ -128,6 +152,8 @@ VOID onConnectionStateChange(UINT64, RTC_PEER_CONNECTION_STATE);
 STATUS sessionCleanupWait(PSampleConfiguration);
 STATUS awaitGetIceConfigInfoCount(SIGNALING_CLIENT_HANDLE, PUINT32);
 STATUS logSignalingClientStats(PSignalingClientMetrics);
+STATUS logSelectedIceCandidatesInformation(PSampleStreamingSession);
+STATUS logStartUpLatency(PSampleConfiguration);
 
 #ifdef __cplusplus
 }
