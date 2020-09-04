@@ -39,7 +39,7 @@ INT32 main(INT32 argc, CHAR* argv[])
     // Set the audio and video handlers
     pSampleConfiguration->audioSource = sendAudioPackets;
     pSampleConfiguration->videoSource = sendVideoPackets;
-    pSampleConfiguration->receiveAudioVideoSource = sampleReceiveAudioFrame;
+    pSampleConfiguration->receiveAudioVideoSource = sampleReceiveVideoFrame;
     pSampleConfiguration->onDataChannel = onDataChannel;
     pSampleConfiguration->mediaType = SAMPLE_STREAMING_AUDIO_VIDEO;
     printf("[KVS Master] Finished setting audio and video handlers\n");
@@ -68,7 +68,7 @@ INT32 main(INT32 argc, CHAR* argv[])
     }
     printf("[KVS Master] KVS WebRTC initialization completed successfully\n");
 
-    pSampleConfiguration->signalingClientCallbacks.messageReceivedFn = masterMessageReceived;
+    pSampleConfiguration->signalingClientCallbacks.messageReceivedFn = signalingMessageReceived;
 
     strcpy(pSampleConfiguration->clientInfo.clientId, SAMPLE_MASTER_CLIENT_ID);
 
@@ -234,7 +234,7 @@ PVOID sendVideoPackets(PVOID args)
         encoderStats.targetBitrate = 262000;
         frame.presentationTs += SAMPLE_VIDEO_FRAME_DURATION;
 
-        MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
+        MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
         for (i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
             status = writeFrame(pSampleConfiguration->sampleStreamingSessionList[i]->pVideoRtcRtpTransceiver, &frame);
             encoderStats.encodeTimeMsec = 4; // update encode time to an arbitrary number to demonstrate stats update
@@ -244,17 +244,10 @@ PVOID sendVideoPackets(PVOID args)
 #ifdef VERBOSE
                     printf("writeFrame() failed with 0x%08x\n", status);
 #endif
-                } else if (pSampleConfiguration->sampleStreamingSessionList[i]->firstFrame) {
-                    pSampleConfiguration->sampleStreamingSessionList[i]->firstFrame = FALSE;
-                    pSampleConfiguration->sampleStreamingSessionList[i]->startUpLatency =
-                        (GETTIME() - pSampleConfiguration->sampleStreamingSessionList[i]->firstSdpMsgReceiveTime) /
-                        HUNDREDS_OF_NANOS_IN_A_MILLISECOND;
-                    printf("Start up latency from offer to first frame: %" PRIu64 "ms\n",
-                           pSampleConfiguration->sampleStreamingSessionList[i]->startUpLatency);
                 }
             }
         }
-        MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+        MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
 
         // Adjust sleep in the case the sleep itself and writeFrame take longer than expected. Since sleep makes sure that the thread
         // will be paused at least until the given amount, we can assume that there's no too early frame scenario.
@@ -318,7 +311,7 @@ PVOID sendAudioPackets(PVOID args)
 
         frame.presentationTs += SAMPLE_AUDIO_FRAME_DURATION;
 
-        MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
+        MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
         for (i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
             status = writeFrame(pSampleConfiguration->sampleStreamingSessionList[i]->pAudioRtcRtpTransceiver, &frame);
             if (status != STATUS_SRTP_NOT_READY_YET) {
@@ -326,17 +319,10 @@ PVOID sendAudioPackets(PVOID args)
 #ifdef VERBOSE
                     printf("writeFrame() failed with 0x%08x\n", status);
 #endif
-                } else if (pSampleConfiguration->sampleStreamingSessionList[i]->firstFrame) {
-                    pSampleConfiguration->sampleStreamingSessionList[i]->firstFrame = FALSE;
-                    pSampleConfiguration->sampleStreamingSessionList[i]->startUpLatency =
-                        (GETTIME() - pSampleConfiguration->sampleStreamingSessionList[i]->firstSdpMsgReceiveTime) /
-                        HUNDREDS_OF_NANOS_IN_A_MILLISECOND;
-                    printf("Start up latency from offer to first frame: %" PRIu64 "ms\n",
-                           pSampleConfiguration->sampleStreamingSessionList[i]->startUpLatency);
                 }
             }
         }
-        MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+        MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
         THREAD_SLEEP(SAMPLE_AUDIO_FRAME_DURATION);
     }
 
@@ -345,16 +331,16 @@ CleanUp:
     return (PVOID)(ULONG_PTR) retStatus;
 }
 
-PVOID sampleReceiveAudioFrame(PVOID args)
+PVOID sampleReceiveVideoFrame(PVOID args)
 {
     STATUS retStatus = STATUS_SUCCESS;
     PSampleStreamingSession pSampleStreamingSession = (PSampleStreamingSession) args;
     if (pSampleStreamingSession == NULL) {
-        printf("[KVS Master] sampleReceiveAudioFrame(): operation returned status code: 0x%08x \n", STATUS_NULL_ARG);
+        printf("[KVS Master] sampleReceiveVideoFrame(): operation returned status code: 0x%08x \n", STATUS_NULL_ARG);
         goto CleanUp;
     }
 
-    retStatus = transceiverOnFrame(pSampleStreamingSession->pAudioRtcRtpTransceiver, (UINT64) pSampleStreamingSession, sampleFrameHandler);
+    retStatus = transceiverOnFrame(pSampleStreamingSession->pVideoRtcRtpTransceiver, (UINT64) pSampleStreamingSession, sampleFrameHandler);
     if (retStatus != STATUS_SUCCESS) {
         printf("[KVS Master] transceiverOnFrame(): operation returned status code: 0x%08x \n", retStatus);
         goto CleanUp;

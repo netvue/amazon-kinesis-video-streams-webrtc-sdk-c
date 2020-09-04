@@ -176,7 +176,9 @@ STATUS setPayloadTypesFromOffer(PHashTable codecTable, PHashTable rtxTable, PSes
                 CHK_STATUS(hashTableUpsert(codecTable, RTC_CODEC_ALAW, DEFAULT_PAYLOAD_ALAW));
             }
 
-            attributeValue = end + 1;
+            if (end != NULL) {
+                attributeValue = end + 1;
+            }
         } while (end != NULL);
 
         for (currentAttribute = 0; currentAttribute < pMediaDescription->mediaAttributesCount; currentAttribute++) {
@@ -825,7 +827,9 @@ STATUS reorderTransceiverByRemoteDescription(PKvsPeerConnection pKvsPeerConnecti
             if (supportCodec) {
                 CHK_STATUS(copyTransceiverWithCodec(pKvsPeerConnection, rtcCodec, &foundMediaSectionWithCodec));
             }
-            attributeValue = end + 1;
+            if (end != NULL) {
+                attributeValue = end + 1;
+            }
         } while (end != NULL && !foundMediaSectionWithCodec);
 
         // Scan the media section attributes for codecs we support

@@ -32,6 +32,10 @@ extern "C" {
 
 #define FILE_LOGGING_BUFFER_SIZE (100 * 1024)
 #define MAX_NUMBER_OF_LOG_FILES  5
+
+#define SAMPLE_HASH_TABLE_BUCKET_COUNT  50
+#define SAMPLE_HASH_TABLE_BUCKET_LENGTH 2
+
 typedef enum {
     SAMPLE_STREAMING_VIDEO_ONLY,
     SAMPLE_STREAMING_AUDIO_VIDEO,
@@ -73,6 +77,10 @@ typedef struct {
     startRoutine receiveAudioVideoSource;
     RtcOnDataChannel onDataChannel;
 
+    TID signalingProcessor;
+    PHashTable pPendingSignalingMessageForRemoteClient;
+    PHashTable pRtcPeerConnectionForRemoteClient;
+
     MUTEX sampleConfigurationObjLock;
     CVAR cvar;
     BOOL trickleIce;
@@ -81,6 +89,7 @@ typedef struct {
     UINT64 customData;
     PSampleStreamingSession sampleStreamingSessionList[DEFAULT_MAX_CONCURRENT_STREAMING_SESSION];
     UINT32 streamingSessionCount;
+    MUTEX streamingSessionListReadLock;
     UINT32 iceUriCount;
     SignalingClientCallbacks signalingClientCallbacks;
     SignalingClientInfo clientInfo;
@@ -93,7 +102,6 @@ struct __SampleStreamingSession {
     volatile ATOMIC_BOOL terminateFlag;
     volatile ATOMIC_BOOL candidateGatheringDone;
     volatile ATOMIC_BOOL peerIdReceived;
-    volatile ATOMIC_BOOL sdpOfferAnswerExchanged;
     volatile SIZE_T frameIndex;
     PRtcPeerConnection pPeerConnection;
     PRtcRtpTransceiver pVideoRtcRtpTransceiver;
@@ -104,10 +112,11 @@ struct __SampleStreamingSession {
     UINT32 videoTimestamp;
     CHAR peerId[MAX_SIGNALING_CLIENT_ID_LEN + 1];
     TID receiveAudioVideoSenderTid;
-    UINT64 firstSdpMsgReceiveTime;
+    UINT64 offerReceiveTime;
     UINT64 startUpLatency;
     BOOL firstFrame;
     RtcMetricsHistory rtcMetricsHistory;
+    BOOL remoteCanTrickleIce;
 
     // this is called when the SampleStreamingSession is being freed
     StreamSessionShutdownCallback shutdownCallback;
@@ -119,14 +128,13 @@ STATUS readFrameFromDisk(PBYTE, PUINT32, PCHAR);
 PVOID sendVideoPackets(PVOID);
 PVOID sendAudioPackets(PVOID);
 PVOID sendGstreamerAudioVideo(PVOID);
-PVOID sampleReceiveAudioFrame(PVOID args);
+PVOID sampleReceiveVideoFrame(PVOID args);
 PVOID getPeriodicIceCandidatePairStats(PVOID);
 STATUS getIceCandidatePairStatsCallback(UINT32 timerId, UINT64 currentTime, UINT64 customData);
 STATUS createSampleConfiguration(PCHAR, SIGNALING_CHANNEL_ROLE_TYPE, BOOL, BOOL, PSampleConfiguration*);
 STATUS freeSampleConfiguration(PSampleConfiguration*);
-STATUS viewerMessageReceived(UINT64, PReceivedSignalingMessage);
 STATUS signalingClientStateChanged(UINT64, SIGNALING_CLIENT_STATE);
-STATUS masterMessageReceived(UINT64, PReceivedSignalingMessage);
+STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pReceivedSignalingMessage);
 STATUS handleAnswer(PSampleConfiguration, PSampleStreamingSession, PSignalingMessage);
 STATUS handleOffer(PSampleConfiguration, PSampleStreamingSession, PSignalingMessage);
 STATUS handleRemoteCandidate(PSampleStreamingSession, PSignalingMessage);

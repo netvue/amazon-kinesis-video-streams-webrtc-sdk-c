@@ -82,7 +82,13 @@ STATUS allocateSctp(PKvsPeerConnection pKvsPeerConnection)
     CHK_STATUS(createSctpSession(&sctpSessionCallbacks, &(pKvsPeerConnection->pSctpSession)));
 
     for (; currentDataChannelId < data.currentDataChannelId; currentDataChannelId += 2) {
-        CHK_STATUS(hashTableGet(pKvsPeerConnection->pDataChannels, currentDataChannelId, (PUINT64) &pKvsDataChannel));
+        pKvsDataChannel = NULL;
+        retStatus = hashTableGet(pKvsPeerConnection->pDataChannels, currentDataChannelId, (PUINT64) &pKvsDataChannel);
+        if (retStatus == STATUS_SUCCESS || retStatus == STATUS_HASH_KEY_NOT_PRESENT) {
+            retStatus = STATUS_SUCCESS;
+        } else {
+            CHK(FALSE, retStatus);
+        }
         CHK(pKvsDataChannel != NULL, STATUS_INTERNAL_ERROR);
         sctpSessionWriteDcep(pKvsPeerConnection->pSctpSession, currentDataChannelId, pKvsDataChannel->dataChannel.name,
                              STRLEN(pKvsDataChannel->dataChannel.name), &pKvsDataChannel->rtcDataChannelInit);
@@ -132,9 +138,11 @@ VOID onInboundPacket(UINT64 customData, PBYTE buff, UINT32 buffLen)
                 CHK_STATUS(allocateSrtp(pKvsPeerConnection));
             }
 
+#ifdef ENABLE_DATA_CHANNEL
             if (pKvsPeerConnection->pSctpSession == NULL) {
                 CHK_STATUS(allocateSctp(pKvsPeerConnection));
             }
+#endif
         }
 
     } else if ((buff[0] > 127 && buff[0] < 192) && (pKvsPeerConnection->pSrtpSession != NULL)) {
@@ -280,8 +288,13 @@ STATUS onFrameReadyFunc(UINT64 customData, UINT16 startIndex, UINT16 endIndex, U
 
     CHK(pTransceiver != NULL, STATUS_NULL_ARG);
 
-    pPacket = pTransceiver->pJitterBuffer->pktBuffer[startIndex];
     // TODO: handle multi-packet frames
+    retStatus = hashTableGet(pTransceiver->pJitterBuffer->pPkgBufferHashTable, startIndex, (PUINT64) &pPacket);
+    if (retStatus == STATUS_SUCCESS || retStatus == STATUS_HASH_KEY_NOT_PRESENT) {
+        retStatus = STATUS_SUCCESS;
+    } else {
+        CHK(FALSE, retStatus);
+    }
     CHK(pPacket != NULL, STATUS_NULL_ARG);
     MUTEX_LOCK(pTransceiver->statsLock);
     // https://www.w3.org/TR/webrtc-stats/#dom-rtcinboundrtpstreamstats-jitterbufferdelay
@@ -314,6 +327,7 @@ STATUS onFrameReadyFunc(UINT64 customData, UINT16 startIndex, UINT16 endIndex, U
     }
 
 CleanUp:
+    CHK_LOG_ERR(retStatus);
     return retStatus;
 }
 
@@ -325,7 +339,12 @@ STATUS onFrameDroppedFunc(UINT64 customData, UINT16 startIndex, UINT16 endIndex,
     PKvsRtpTransceiver pTransceiver = (PKvsRtpTransceiver) customData;
     DLOGW("Frame with timestamp %ld is dropped!", timestamp);
     CHK(pTransceiver != NULL, STATUS_NULL_ARG);
-    pPacket = pTransceiver->pJitterBuffer->pktBuffer[startIndex];
+    retStatus = hashTableGet(pTransceiver->pJitterBuffer->pPkgBufferHashTable, startIndex, (PUINT64) &pPacket);
+    if (retStatus == STATUS_SUCCESS || retStatus == STATUS_HASH_KEY_NOT_PRESENT) {
+        retStatus = STATUS_SUCCESS;
+    } else {
+        CHK(FALSE, retStatus);
+    }
     // TODO: handle multi-packet frames
     CHK(pPacket != NULL, STATUS_NULL_ARG);
     MUTEX_LOCK(pTransceiver->statsLock);
@@ -451,7 +470,12 @@ VOID onSctpSessionDataChannelMessage(UINT64 customData, UINT32 channelId, BOOL i
 
     CHK(pKvsPeerConnection != NULL, STATUS_INTERNAL_ERROR);
 
-    CHK_STATUS(hashTableGet(pKvsPeerConnection->pDataChannels, channelId, (PUINT64) &pKvsDataChannel));
+    retStatus = hashTableGet(pKvsPeerConnection->pDataChannels, channelId, (PUINT64) &pKvsDataChannel);
+    if (retStatus == STATUS_SUCCESS || retStatus == STATUS_HASH_KEY_NOT_PRESENT) {
+        retStatus = STATUS_SUCCESS;
+    } else {
+        CHK(FALSE, retStatus);
+    }
     CHK(pKvsDataChannel != NULL && pKvsDataChannel->onMessage != NULL, STATUS_INTERNAL_ERROR);
     pKvsDataChannel->rtcDataChannelDiagnostics.messagesReceived++;
     pKvsDataChannel->rtcDataChannelDiagnostics.bytesReceived += pMessageLen;
@@ -655,6 +679,7 @@ STATUS createPeerConnection(PRtcConfiguration pConfiguration, PRtcPeerConnection
     pKvsPeerConnection->MTU = pConfiguration->kvsRtcConfiguration.maximumTransmissionUnit == 0
         ? DEFAULT_MTU_SIZE
         : pConfiguration->kvsRtcConfiguration.maximumTransmissionUnit;
+    pKvsPeerConnection->sctpIsEnabled = FALSE;
 
     iceAgentCallbacks.customData = (UINT64) pKvsPeerConnection;
     iceAgentCallbacks.inboundPacketFn = onInboundPacket;
@@ -933,9 +958,11 @@ STATUS setRemoteDescription(PRtcPeerConnection pPeerConnection, PRtcSessionDescr
     }
 
     for (i = 0; i < pSessionDescription->mediaCount; i++) {
+#ifdef ENABLE_DATA_CHANNEL
         if (STRNCMP(pSessionDescription->mediaDescriptions[i].mediaName, "application", SIZEOF("application") - 1) == 0) {
             pKvsPeerConnection->sctpIsEnabled = TRUE;
         }
+#endif
 
         for (j = 0; j < pSessionDescription->mediaDescriptions[i].mediaAttributesCount; j++) {
             if (STRCMP(pSessionDescription->mediaDescriptions[i].sdpAttributes[j].attributeName, "ice-ufrag") == 0) {
@@ -1010,7 +1037,9 @@ STATUS createOffer(PRtcPeerConnection pPeerConnection, PRtcSessionDescriptionIni
     pSessionDescriptionInit->type = SDP_TYPE_OFFER;
     pKvsPeerConnection->isOffer = TRUE;
 
+#ifdef ENABLE_DATA_CHANNEL
     pKvsPeerConnection->sctpIsEnabled = TRUE;
+#endif
     CHK_STATUS(setPayloadTypesForOffer(pKvsPeerConnection->pCodecTable));
 
     CHK_STATUS(populateSessionDescription(pKvsPeerConnection, &(pKvsPeerConnection->remoteSessionDescription), pSessionDescription));
@@ -1249,7 +1278,9 @@ STATUS initKvsWebRtc(VOID)
 
     KVS_CRYPTO_INIT();
 
+#ifdef ENABLE_DATA_CHANNEL
     CHK_STATUS(initSctpSession());
+#endif
 
     ATOMIC_STORE_BOOL(&gKvsWebRtcInitialized, TRUE);
 
@@ -1265,7 +1296,9 @@ STATUS deinitKvsWebRtc(VOID)
     STATUS retStatus = STATUS_SUCCESS;
     CHK(ATOMIC_LOAD_BOOL(&gKvsWebRtcInitialized), retStatus);
 
+#ifdef ENABLE_DATA_CHANNEL
     deinitSctpSession();
+#endif
 
     srtp_shutdown();
 
