@@ -45,7 +45,7 @@ matrix:
       os: osx
       compiler: gcc
       before_script:
-        - mkdir build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TEST=TRUE
+        - mkdir build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TEST=TRUE -DCOMPILER_WARNINGS=TRUE
       script:
         - make
         - export DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:`pwd`/../open-source/lib"
@@ -152,10 +152,12 @@ matrix:
         - alpine() { docker exec -it alpine "$@"; }
       install:
         - alpine apk update
-        - alpine apk add alpine-sdk cmake clang linux-headers perl
+        - alpine apk add alpine-sdk cmake clang linux-headers perl bash
       script:
-        - alpine cmake .. -DBUILD_STATIC=TRUE -DBUILD_OPENSSL=TRUE -DBUILD_TEST=TRUE
+        - alpine cmake .. -DBUILD_STATIC_LIBS=TRUE -DBUILD_TEST=TRUE
         - alpine make
+        # ldd will return non-zero when there's no dynamic link. So, the positive value for static builds is non-zero
+        - alpine ../check-static-build.sh || travis_terminate 1
         - alpine ./tst/webrtc_client_test
       after_failure: skip # no coredumps in container
 
@@ -222,7 +224,8 @@ matrix:
         - docker run -w /src/.github -dit --name alpine -v $(pwd):/src alpine
         - alpine() { docker exec -it alpine "$@"; }
         - alpine apk update
-        - alpine apk add doxygen
+        - alpine apk add doxygen graphviz 
+        - alpine apk add --no-cache ttf-freefont
       script:
         # Add SSH key to agent
         - |

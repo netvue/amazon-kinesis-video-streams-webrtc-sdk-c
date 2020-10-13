@@ -15,11 +15,12 @@ STATUS createSignalingSync(PSignalingClientInfoInternal pClientInfo, PChannelInf
     struct lws_context_creation_info creationInfo;
     PStateMachineState pStateMachineState;
     BOOL cacheFound = FALSE;
-    SignalingFileCacheEntry fileCacheEntry;
+    PSignalingFileCacheEntry pFileCacheEntry = NULL;
 
     CHK(pClientInfo != NULL && pChannelInfo != NULL && pCallbacks != NULL && pCredentialProvider != NULL && ppSignalingClient != NULL,
         STATUS_NULL_ARG);
     CHK(pChannelInfo->version <= CHANNEL_INFO_CURRENT_VERSION, STATUS_SIGNALING_INVALID_CHANNEL_INFO_VERSION);
+    CHK(NULL != (pFileCacheEntry = (PSignalingFileCacheEntry) MEMALLOC(SIZEOF(SignalingFileCacheEntry))), STATUS_NOT_ENOUGH_MEMORY);
 
     // Allocate enough storage
     CHK(NULL != (pSignalingClient = (PSignalingClient) MEMCALLOC(1, SIZEOF(SignalingClient))), STATUS_NOT_ENOUGH_MEMORY);
@@ -44,14 +45,14 @@ STATUS createSignalingSync(PSignalingClientInfoInternal pClientInfo, PChannelInf
     if (pSignalingClient->pChannelInfo->cachingPolicy == SIGNALING_API_CALL_CACHE_TYPE_FILE) {
         // Signaling channel name can be NULL in case of pre-created channels in which case we use ARN as the name
         if (STATUS_FAILED(signalingCacheLoadFromFile(pChannelInfo->pChannelName != NULL ? pChannelInfo->pChannelName : pChannelInfo->pChannelArn,
-                                                     pChannelInfo->pRegion, pChannelInfo->channelRoleType, &fileCacheEntry, &cacheFound))) {
+                                                     pChannelInfo->pRegion, pChannelInfo->channelRoleType, pFileCacheEntry, &cacheFound))) {
             DLOGW("Failed to load signaling cache from file");
         } else if (cacheFound) {
-            STRCPY(pSignalingClient->channelDescription.channelArn, fileCacheEntry.channelArn);
-            STRCPY(pSignalingClient->channelEndpointHttps, fileCacheEntry.httpsEndpoint);
-            STRCPY(pSignalingClient->channelEndpointWss, fileCacheEntry.wssEndpoint);
-            pSignalingClient->describeTime = fileCacheEntry.creationTsEpochSeconds * HUNDREDS_OF_NANOS_IN_A_SECOND;
-            pSignalingClient->getEndpointTime = fileCacheEntry.creationTsEpochSeconds * HUNDREDS_OF_NANOS_IN_A_SECOND;
+            STRCPY(pSignalingClient->channelDescription.channelArn, pFileCacheEntry->channelArn);
+            STRCPY(pSignalingClient->channelEndpointHttps, pFileCacheEntry->httpsEndpoint);
+            STRCPY(pSignalingClient->channelEndpointWss, pFileCacheEntry->wssEndpoint);
+            pSignalingClient->describeTime = pFileCacheEntry->creationTsEpochSeconds * HUNDREDS_OF_NANOS_IN_A_SECOND;
+            pSignalingClient->getEndpointTime = pFileCacheEntry->creationTsEpochSeconds * HUNDREDS_OF_NANOS_IN_A_SECOND;
         }
     }
 
@@ -176,7 +177,7 @@ CleanUp:
     if (ppSignalingClient != NULL) {
         *ppSignalingClient = pSignalingClient;
     }
-
+    SAFE_MEMFREE(pFileCacheEntry);
     LEAVES();
     return retStatus;
 }
@@ -580,7 +581,7 @@ STATUS refreshIceConfigurationCallback(UINT32 timerId, UINT64 scheduledTime, UIN
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
-    PStateMachineState pStateMachineState;
+    PStateMachineState pStateMachineState = NULL;
     PSignalingClient pSignalingClient = (PSignalingClient) customData;
     CHAR iceRefreshErrMsg[SIGNALING_MAX_ERROR_MESSAGE_LEN + 1];
     UINT32 iceRefreshErrLen, newTimerId;
@@ -613,6 +614,9 @@ STATUS refreshIceConfigurationCallback(UINT32 timerId, UINT64 scheduledTime, UIN
 
     // Iterate the state machinery in steady states only - ready or connected
     if (pStateMachineState->state == SIGNALING_STATE_READY || pStateMachineState->state == SIGNALING_STATE_CONNECTED) {
+        // Set the time out before execution
+        pSignalingClient->stepUntil = GETTIME() + SIGNALING_REFRESH_ICE_CONFIG_STATE_TIMEOUT;
+
         CHK_STATUS(stepSignalingStateMachine(pSignalingClient, retStatus));
     }
 
@@ -624,6 +628,13 @@ CleanUp:
     if (pSignalingClient != NULL && STATUS_FAILED(retStatus)) {
         // Update the diagnostics info prior calling the error callback
         ATOMIC_INCREMENT(&pSignalingClient->diagnostics.numberOfRuntimeErrors);
+
+        // Reset the stored state as we could have been connected prior to the ICE refresh and we still need to be connected
+        if (pStateMachineState != NULL) {
+            setStateMachineCurrentState(pSignalingClient->pStateMachine, pStateMachineState->state);
+        }
+
+        // Need to invoke the error handler callback
         if (pSignalingClient->signalingClientCallbacks.errorReportFn != NULL) {
             iceRefreshErrLen = SNPRINTF(iceRefreshErrMsg, SIGNALING_MAX_ERROR_MESSAGE_LEN, SIGNALING_ICE_CONFIG_REFRESH_ERROR_MSG, retStatus);
             iceRefreshErrMsg[SIGNALING_MAX_ERROR_MESSAGE_LEN] = '\0';
@@ -709,7 +720,7 @@ STATUS signalingGetOngoingMessage(PSignalingClient pSignalingClient, PCHAR corre
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
     BOOL locked = FALSE, checkPeerClientId = TRUE;
-    PSignalingMessage pExistingMessage;
+    PSignalingMessage pExistingMessage = NULL;
     StackQueueIterator iterator;
     UINT64 data;
 
@@ -740,10 +751,11 @@ STATUS signalingGetOngoingMessage(PSignalingClient pSignalingClient, PCHAR corre
         CHK_STATUS(stackQueueIteratorNext(&iterator));
     }
 
-    // Didn't find a match
-    *ppSignalingMessage = NULL;
-
 CleanUp:
+
+    if (ppSignalingMessage != NULL) {
+        *ppSignalingMessage = pExistingMessage;
+    }
 
     if (locked) {
         MUTEX_UNLOCK(pSignalingClient->messageQueueLock);
