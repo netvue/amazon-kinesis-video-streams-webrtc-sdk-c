@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 2.8)
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake;${CMAKE_MODULE_PATH}")
 include(Utilities)
+include(CheckIncludeFiles)
+include(CheckFunctionExists)
+
 project(KinesisVideoWebRTCClient LANGUAGES C)
 
 # User Flags
@@ -24,12 +27,29 @@ option(MEMORY_SANITIZER "Build with MemorySanitizer." OFF)
 option(THREAD_SANITIZER "Build with ThreadSanitizer." OFF)
 option(UNDEFINED_BEHAVIOR_SANITIZER "Build with UndefinedBehaviorSanitizer." OFF)
 
+if(NOT WIN32)
+CHECK_INCLUDE_FILES(ifaddrs.h       KVSWEBRTC_HAVE_IFADDRS_H)
+if(NOT KVSWEBRTC_HAVE_IFADDRS_H)
+  message(FATAL_ERROR "Platform should support the ifaddrs interface.")
+endif()
+CHECK_FUNCTION_EXISTS(getifaddrs    KVSWEBRTC_HAVE_GETIFADDRS)
+if(NOT KVSWEBRTC_HAVE_GETIFADDRS)
+  message(FATAL_ERROR "Platform should support getifaddrs API.")
+endif()
+endif()
+
 set(CMAKE_MACOSX_RPATH TRUE)
 get_filename_component(ROOT "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
 
 # static settings
 if(BUILD_STATIC_LIBS OR WIN32)
   set(LINKAGE STATIC)
+  # Force CMake to find static libs
+  if(WIN32)
+    SET(CMAKE_FIND_LIBRARY_SUFFIXES .lib .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+  else()
+    SET(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+  endif()
 else()
   set(LINKAGE SHARED)
 endif()
@@ -69,13 +89,13 @@ if(BUILD_DEPENDENCIES)
   endif()
 
   if (USE_OPENSSL)
-    set(BUILD_ARGS -DBUILD_STATIC=${BUILD_STATIC}
+    set(BUILD_ARGS -DBUILD_STATIC_LIBS=${BUILD_STATIC_LIBS}
                    -DBUILD_OPENSSL_PLATFORM=${BUILD_OPENSSL_PLATFORM}
                    -DOPENSSL_EXTRA=${OPENSSL_EXTRA})
     build_dependency(openssl ${BUILD_ARGS})
     set(OPENSSL_ROOT_DIR ${OPEN_SRC_INSTALL_PREFIX})
   elseif(USE_MBEDTLS)
-    set(BUILD_ARGS -DBUILD_STATIC=${BUILD_STATIC})
+    set(BUILD_ARGS -DBUILD_STATIC_LIBS=${BUILD_STATIC_LIBS})
     build_dependency(mbedtls ${BUILD_ARGS})
   endif()
 
@@ -243,8 +263,6 @@ endif()
 
 file(GLOB WEBRTC_SIGNALING_CLIENT_SOURCE_FILES "src/source/Signaling/*.c")
 
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/samples/opusSampleFrames" DESTINATION .)
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/samples/h264SampleFrames" DESTINATION .)
 
 include_directories(${OPEN_SRC_INCLUDE_DIRS})
 include_directories(${OPEN_SRC_INSTALL_PREFIX}/include)
@@ -270,15 +288,16 @@ add_library(kvsWebrtcSignalingClient ${LINKAGE} ${WEBRTC_SIGNALING_CLIENT_SOURCE
 
 target_link_libraries(
   kvsWebrtcSignalingClient
+  PUBLIC
+        kvsCommonLws
+        ${LIBWEBSOCKETS_LIBRARIES} 
   PRIVATE kvspicUtils
-          kvspicState
-          ${CMAKE_THREAD_LIBS_INIT}
-          ${LIBWEBSOCKETS_LIBRARIES}
-          ${EXTRA_DEPS}
-          ${OPENSSL_SSL_LIBRARY}
-          ${OPENSSL_CRYPTO_LIBRARY}
-          ${MBEDTLS_LIBRARIES}
-  PUBLIC kvsCommonLws)
+         kvspicState
+         ${CMAKE_THREAD_LIBS_INIT}
+         ${EXTRA_DEPS}
+         ${OPENSSL_SSL_LIBRARY}
+         ${OPENSSL_CRYPTO_LIBRARY}
+         ${MBEDTLS_LIBRARIES})
 
 if (WIN32)
   target_link_libraries(kvsWebrtcClient PRIVATE "Ws2_32" "iphlpapi")
@@ -299,6 +318,9 @@ install(DIRECTORY ${KINESIS_VIDEO_WEBRTC_CLIENT_SRC}/src/include/
 )
 
 if (BUILD_SAMPLE)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/samples/opusSampleFrames" DESTINATION .)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/samples/h264SampleFrames" DESTINATION .)
+
   add_executable(
     kvsWebrtcClientMaster
     ${KINESIS_VIDEO_WEBRTC_CLIENT_SRC}/samples/Common.c
