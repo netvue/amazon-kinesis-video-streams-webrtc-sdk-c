@@ -294,8 +294,15 @@ INT32 lwsWssCallbackRoutine(struct lws* wsi, enum lws_callback_reasons reason, P
             ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_UNKNOWN);
 
             if (connected && !ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-                // Handle re-connection in a reconnect handler thread
-                CHK_STATUS(THREAD_CREATE(&pSignalingClient->reconnecterTracker.threadId, reconnectHandler, (PVOID) pSignalingClient));
+                // Handle re-connection in a reconnect handler thread. Set the terminated indicator before the thread
+                // creation and the thread itself will reset it. NOTE: Need to check for a failure and reset.
+                ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, FALSE);
+                retStatus = THREAD_CREATE(&pSignalingClient->reconnecterTracker.threadId, reconnectHandler, (PVOID) pSignalingClient);
+                if (STATUS_FAILED(retStatus)) {
+                    ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, TRUE);
+                    CHK(FALSE, retStatus);
+                }
+
                 CHK_STATUS(THREAD_DETACH(pSignalingClient->reconnecterTracker.threadId));
             }
 
@@ -333,8 +340,14 @@ INT32 lwsWssCallbackRoutine(struct lws* wsi, enum lws_callback_reasons reason, P
                 // Set the result failed
                 ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_UNKNOWN);
 
-                // Handle re-connection in a reconnect handler thread
-                CHK_STATUS(THREAD_CREATE(&pSignalingClient->reconnecterTracker.threadId, reconnectHandler, (PVOID) pSignalingClient));
+                // Handle re-connection in a reconnect handler thread. Set the terminated indicator before the thread
+                // creation and the thread itself will reset it. NOTE: Need to check for a failure and reset.
+                ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, FALSE);
+                retStatus = THREAD_CREATE(&pSignalingClient->reconnecterTracker.threadId, reconnectHandler, (PVOID) pSignalingClient);
+                if (STATUS_FAILED(retStatus)) {
+                    ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, TRUE);
+                    CHK(FALSE, retStatus);
+                }
                 CHK_STATUS(THREAD_DETACH(pSignalingClient->reconnecterTracker.threadId));
             }
 
@@ -465,7 +478,7 @@ STATUS lwsCompleteSync(PLwsCallInfo pCallInfo)
     struct lws_client_connect_info connectInfo;
     struct lws* clientLws;
     struct lws_context* pContext;
-    BOOL secureConnection, locked = FALSE;
+    BOOL secureConnection, locked = FALSE, serializerLocked = FALSE, iterate = TRUE;
     CHAR path[MAX_URI_CHAR_LEN + 1];
 
     CHK(pCallInfo != NULL && pCallInfo->callInfo.pRequestInfo != NULL && pCallInfo->pSignalingClient != NULL, STATUS_NULL_ARG);
@@ -531,23 +544,89 @@ STATUS lwsCompleteSync(PLwsCallInfo pCallInfo)
 
     connectInfo.opaque_user_data = pCallInfo;
 
-    MUTEX_LOCK(pCallInfo->pSignalingClient->lwsServiceLock);
-    locked = TRUE;
-    CHK(NULL != lws_client_connect_via_info(&connectInfo), STATUS_SIGNALING_LWS_CLIENT_CONNECT_FAILED);
-    MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsServiceLock);
-    locked = FALSE;
+    // Attempt to iterate and acquire the locks
+    // NOTE: The https protocol should be called sequentially only
+    MUTEX_LOCK(pCallInfo->pSignalingClient->lwsSerializerLock);
+    serializerLocked = TRUE;
+
+    // Ensure we are not running another https protocol
+    // The WSIs for all of the protocols are set and cleared in this function only.
+    // The HTTPS is serialized via the state machine lock and we should not encounter
+    // another https protocol in flight. The only case is when we have an http request
+    // and a wss is in progress. This is the case when we have a current websocket listener
+    // and need to perform an https call due to ICE server config refresh for example.
+    // If we have an ongoing wss operations, we can't call lws_client_connect_via_info API
+    // due to threading model of LWS. WHat we need to do is to wake up the potentially blocked
+    // ongoing wss handler for it to release the service lock which it holds while calling lws_service()
+    // API so we can grab the lock in order to perform the lws_client_connect_via_info API call.
+    // The need to wake up the wss handler (if any) to compete for the lock is the reason for this
+    // loop. In order to avoid pegging of the CPU while the contention for the lock happes,
+    // we are setting an atomic and releasing it to trigger a timed wait when the lws_service call
+    // awakes to make sure we are not going to starve this thread.
+
+    // NOTE: The THREAD_SLEEP calls in this routine are not designed to adjust
+    // the execution timing/race conditions but to eliminate a busy wait in a spin-lock
+    // type scenario for resource contention.
+
+    // We should have HTTPS protocol serialized at the state machine level
+    CHK_ERR(pCallInfo->pSignalingClient->currentWsi[PROTOCOL_INDEX_HTTPS] == NULL, STATUS_INVALID_OPERATION,
+            "HTTPS requests should be processed sequentially.");
+
+    // Indicate that we are trying to acquire the lock
+    ATOMIC_STORE_BOOL(&pCallInfo->pSignalingClient->serviceLockContention, TRUE);
+    while (iterate && pCallInfo->pSignalingClient->currentWsi[PROTOCOL_INDEX_WSS] != NULL) {
+        if (!MUTEX_TRYLOCK(pCallInfo->pSignalingClient->lwsServiceLock)) {
+            // Wake up the event loop
+            CHK_STATUS(wakeLwsServiceEventLoop(pCallInfo->pSignalingClient, PROTOCOL_INDEX_WSS));
+        } else {
+            locked = TRUE;
+            iterate = FALSE;
+        }
+    }
+    ATOMIC_STORE_BOOL(&pCallInfo->pSignalingClient->serviceLockContention, FALSE);
+
+    // Now we should be running with a lock
+    CHK(NULL != (pCallInfo->pSignalingClient->currentWsi[pCallInfo->protocolIndex] = lws_client_connect_via_info(&connectInfo)),
+        STATUS_SIGNALING_LWS_CLIENT_CONNECT_FAILED);
+    if (locked) {
+        MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsServiceLock);
+        locked = FALSE;
+    }
+
+    MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsSerializerLock);
+    serializerLocked = FALSE;
 
     while (retVal >= 0 && !gInterruptedFlagBySignalHandler && pCallInfo->callInfo.pRequestInfo != NULL &&
            !ATOMIC_LOAD_BOOL(&pCallInfo->callInfo.pRequestInfo->terminating)) {
-        if (!MUTEX_TRYLOCK(pCallInfo->pSignalingClient->lwsSerializerLock)) {
+        if (!MUTEX_TRYLOCK(pCallInfo->pSignalingClient->lwsServiceLock)) {
             THREAD_SLEEP(LWS_SERVICE_LOOP_ITERATION_WAIT);
         } else {
             retVal = lws_service(pContext, 0);
-            MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsSerializerLock);
+            MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsServiceLock);
+
+            // Add a minor timeout to relinquish the thread quota to eliminate thread starvation
+            // when competing for the service lock
+            if (ATOMIC_LOAD_BOOL(&pCallInfo->pSignalingClient->serviceLockContention)) {
+                THREAD_SLEEP(LWS_SERVICE_LOOP_ITERATION_WAIT);
+            }
         }
     }
 
+    // Clear the wsi on exit
+    MUTEX_LOCK(pCallInfo->pSignalingClient->lwsSerializerLock);
+    pCallInfo->pSignalingClient->currentWsi[pCallInfo->protocolIndex] = NULL;
+    MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsSerializerLock);
+
 CleanUp:
+
+    // Reset the lock contention indicator in case of failure
+    if (STATUS_FAILED(retStatus) && pCallInfo != NULL && pCallInfo->pSignalingClient != NULL) {
+        ATOMIC_STORE_BOOL(&pCallInfo->pSignalingClient->serviceLockContention, FALSE);
+    }
+
+    if (serializerLocked) {
+        MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsSerializerLock);
+    }
 
     if (locked) {
         MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsServiceLock);
@@ -1338,8 +1417,10 @@ PVOID reconnectHandler(PVOID args)
     MUTEX_LOCK(pSignalingClient->listenerTracker.lock);
     MUTEX_UNLOCK(pSignalingClient->listenerTracker.lock);
 
-    // Indicate that we started
-    ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, FALSE);
+    // Exit immediately if we are shutting down in case we are getting terminated while we were waiting for the
+    // listener thread to terminate. The shutdown flag would have been checked prior kicking off the reconnect
+    // thread but there is a slight chance of a race condition.
+    CHK(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), retStatus);
 
     // Set the time out before execution
     pSignalingClient->stepUntil = GETTIME() + SIGNALING_CONNECT_STATE_TIMEOUT;
@@ -1463,7 +1544,7 @@ STATUS writeLwsData(PSignalingClient pSignalingClient, BOOL awaitForResponse)
     ATOMIC_STORE(&pSignalingClient->messageResult, (SIZE_T) SERVICE_CALL_RESULT_NOT_SET);
 
     // Wake up the service event loop
-    CHK_STATUS(wakeLwsServiceEventLoop(pSignalingClient));
+    CHK_STATUS(wakeLwsServiceEventLoop(pSignalingClient, PROTOCOL_INDEX_WSS));
 
     MUTEX_LOCK(pSignalingClient->sendLock);
     sendLocked = TRUE;
@@ -1731,6 +1812,7 @@ STATUS terminateConnectionWithStatus(PSignalingClient pSignalingClient, SERVICE_
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
+    UINT32 i;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
@@ -1745,8 +1827,11 @@ STATUS terminateConnectionWithStatus(PSignalingClient pSignalingClient, SERVICE_
         ATOMIC_STORE_BOOL(&pSignalingClient->pOngoingCallInfo->cancelService, TRUE);
     }
 
-    // Wake up the service event loop
-    CHK_STATUS(wakeLwsServiceEventLoop(pSignalingClient));
+    // Wake up the service event loop for all of the protocols
+    for (i = 0; i < LWS_PROTOCOL_COUNT; i++) {
+        CHK_STATUS(wakeLwsServiceEventLoop(pSignalingClient, i));
+    }
+
     CHK_STATUS(awaitForThreadTermination(&pSignalingClient->listenerTracker, SIGNALING_CLIENT_SHUTDOWN_TIMEOUT));
 
 CleanUp:
@@ -1842,7 +1927,7 @@ CleanUp:
     return (PVOID)(ULONG_PTR) retStatus;
 }
 
-STATUS wakeLwsServiceEventLoop(PSignalingClient pSignalingClient)
+STATUS wakeLwsServiceEventLoop(PSignalingClient pSignalingClient, UINT32 protocolIndex)
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
@@ -1850,9 +1935,9 @@ STATUS wakeLwsServiceEventLoop(PSignalingClient pSignalingClient)
     // Early exit in case we don't need to do anything
     CHK(pSignalingClient != NULL && pSignalingClient->pLwsContext != NULL, retStatus);
 
-    MUTEX_LOCK(pSignalingClient->lwsServiceLock);
-    lws_callback_on_writable_all_protocol(pSignalingClient->pLwsContext, &pSignalingClient->signalingProtocols[WSS_SIGNALING_PROTOCOL_INDEX]);
-    MUTEX_UNLOCK(pSignalingClient->lwsServiceLock);
+    if (pSignalingClient->currentWsi[protocolIndex] != NULL) {
+        lws_callback_on_writable(pSignalingClient->currentWsi[protocolIndex]);
+    }
 
 CleanUp:
 
