@@ -55,6 +55,19 @@ STATUS createSignalingSync(PSignalingClientInfoInternal pClientInfo, PChannelInf
             pSignalingClient->getEndpointTime = pFileCacheEntry->creationTsEpochSeconds * HUNDREDS_OF_NANOS_IN_A_SECOND;
         }
     }
+    if (pSignalingClient->pChannelInfo->cachingPolicy == SIGNALING_API_CALL_CACHE_TYPE_PASS_ENDPOINT) {
+        if (pSignalingClient->pChannelInfo->pHTTPSEndpoint != NULL) {
+            STRCPY(pSignalingClient->channelEndpointHttps, pSignalingClient->pChannelInfo->pHTTPSEndpoint);
+            DLOGI("get HTTPS endpoint from Channel info. %s", pSignalingClient->pChannelInfo->pHTTPSEndpoint);
+        }
+        if (pSignalingClient->pChannelInfo->pWSSEndpoint != NULL) {
+            STRCPY(pSignalingClient->channelEndpointWss, pSignalingClient->pChannelInfo->pWSSEndpoint);
+            DLOGI("get WSS endpoint from Channel info. %s", pSignalingClient->pChannelInfo->pWSSEndpoint);
+        }
+        if (pChannelInfo->pChannelArn != NULL) {
+            STRCPY(pSignalingClient->channelDescription.channelArn, pSignalingClient->pChannelInfo->pChannelArn);
+        }
+    }
 
     // Attempting to get the logging level from the env var and if it fails then set it from the client info
     if ((userLogLevelStr = GETENV(DEBUG_LOG_LEVEL_ENV_VAR)) != NULL && STATUS_SUCCEEDED(STRTOUI32(userLogLevelStr, NULL, 10, &userLogLevel))) {
@@ -848,6 +861,8 @@ STATUS describeChannel(PSignalingClient pSignalingClient, UINT64 time)
         case SIGNALING_API_CALL_CACHE_TYPE_NONE:
             break;
 
+        case SIGNALING_API_CALL_CACHE_TYPE_PASS_ENDPOINT:
+            break;
         case SIGNALING_API_CALL_CACHE_TYPE_DESCRIBE_GETENDPOINT:
             /* explicit fall-through */
         case SIGNALING_API_CALL_CACHE_TYPE_FILE:
@@ -963,7 +978,13 @@ STATUS getChannelEndpoint(PSignalingClient pSignalingClient, UINT64 time)
     switch (pSignalingClient->pChannelInfo->cachingPolicy) {
         case SIGNALING_API_CALL_CACHE_TYPE_NONE:
             break;
-
+        case SIGNALING_API_CALL_CACHE_TYPE_PASS_ENDPOINT:
+            if (strlen(pSignalingClient->channelEndpointHttps) != 0 && strlen(pSignalingClient->channelEndpointWss) != 0) {
+                DLOGI("Use external HTTPS endpoint: %s", pSignalingClient->channelEndpointHttps);
+                DLOGI("Use external WSS endpoint: %s", pSignalingClient->channelEndpointWss);
+                apiCall = FALSE;
+                break;
+            }
         case SIGNALING_API_CALL_CACHE_TYPE_DESCRIBE_GETENDPOINT:
             /* explicit fall-through */
         case SIGNALING_API_CALL_CACHE_TYPE_FILE:
@@ -1060,7 +1081,11 @@ STATUS getIceConfig(PSignalingClient pSignalingClient, UINT64 time)
     }
 
     if (STATUS_SUCCEEDED(retStatus)) {
-        retStatus = getIceConfigLws(pSignalingClient, time);
+        retStatus = getIceConfigFromChannelInfo(pSignalingClient, time);
+
+        if (STATUS_FAILED(retStatus)) {
+            retStatus = getIceConfigLws(pSignalingClient, time);
+        }
 
         if (STATUS_SUCCEEDED(retStatus)) {
             pSignalingClient->getIceConfigTime = time;

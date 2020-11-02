@@ -205,6 +205,7 @@ STATUS describeChannelLws(PSignalingClient, UINT64);
 STATUS createChannelLws(PSignalingClient, UINT64);
 STATUS getChannelEndpointLws(PSignalingClient, UINT64);
 STATUS getIceConfigLws(PSignalingClient, UINT64);
+STATUS getIceConfigFromChannelInfo(PSignalingClient pSignalingClient, UINT64 time);
 STATUS connectSignalingChannelLws(PSignalingClient, UINT64);
 STATUS deleteChannelLws(PSignalingClient, UINT64);
 

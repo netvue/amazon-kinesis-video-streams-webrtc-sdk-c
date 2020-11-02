@@ -177,6 +177,24 @@ STATUS createValidateChannelInfo(PChannelInfo pOrigChannelInfo, PChannelInfo* pp
         CHK_STATUS(packageTags(pOrigChannelInfo->tagCount, pOrigChannelInfo->pTags, tagsSize, pChannelInfo->pTags, NULL));
     }
 
+    if (pOrigChannelInfo->iceConfigCount > 0) {
+        pChannelInfo->iceConfigCount = pOrigChannelInfo->iceConfigCount;
+        int iceConfigCount = MAX(MAX_ICE_CONFIG_COUNT, pChannelInfo->iceConfigCount);
+        int i;
+        for (i=0; i<iceConfigCount; i++) {
+            pChannelInfo->pIceConfigs[i] = pOrigChannelInfo->pIceConfigs[i];
+        }
+    }
+
+    if (pOrigChannelInfo->pHTTPSEndpoint != NULL) {
+        pChannelInfo->pHTTPSEndpoint = pOrigChannelInfo->pHTTPSEndpoint;
+    }
+
+    if (pOrigChannelInfo->pWSSEndpoint != NULL) {
+        pChannelInfo->pWSSEndpoint = pOrigChannelInfo->pWSSEndpoint;
+    }
+
+
 CleanUp:
 
     if (STATUS_FAILED(retStatus)) {
