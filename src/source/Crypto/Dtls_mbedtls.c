@@ -3,9 +3,8 @@
 
 /**  https://tools.ietf.org/html/rfc5764#section-4.1.2 */
 mbedtls_ssl_srtp_profile DTLS_SRTP_SUPPORTED_PROFILES[] = {
-    MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
-    MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_32,
-    MBEDTLS_TLS_SRTP_UNSET,
+    MBEDTLS_SRTP_AES128_CM_HMAC_SHA1_80,
+    MBEDTLS_SRTP_AES128_CM_HMAC_SHA1_32,
 };
 
 STATUS createDtlsSession(PDtlsSessionCallbacks pDtlsSessionCallbacks, TIMER_QUEUE_HANDLE timerQueueHandle, INT32 certificateBits,
@@ -279,7 +278,9 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
         CHK(mbedtls_ssl_conf_own_cert(&pDtlsSession->sslCtxConfig, &pCertInfo->cert, &pCertInfo->privateKey) == 0, STATUS_CREATE_SSL_FAILED);
     }
     mbedtls_ssl_conf_dtls_cookies(&pDtlsSession->sslCtxConfig, NULL, NULL, NULL);
-    CHK(mbedtls_ssl_conf_dtls_srtp_protection_profiles(&pDtlsSession->sslCtxConfig, DTLS_SRTP_SUPPORTED_PROFILES) == 0, STATUS_CREATE_SSL_FAILED);
+    CHK(mbedtls_ssl_conf_dtls_srtp_protection_profiles(&pDtlsSession->sslCtxConfig, DTLS_SRTP_SUPPORTED_PROFILES,
+                                                       ARRAY_SIZE(DTLS_SRTP_SUPPORTED_PROFILES)) == 0,
+        STATUS_CREATE_SSL_FAILED);
     mbedtls_ssl_conf_export_keys_ext_cb(&pDtlsSession->sslCtxConfig, dtlsSessionKeyDerivationCallback, pDtlsSession);
 
     CHK(mbedtls_ssl_setup(&pDtlsSession->sslCtx, &pDtlsSession->sslCtxConfig) == 0, STATUS_SSL_CTX_CREATION_FAILED);
@@ -324,7 +325,7 @@ STATUS dtlsSessionProcessPacket(PDtlsSession pDtlsSession, PBYTE pData, PINT32 p
     PIOBuffer pReadBuffer;
     BOOL iterate = TRUE;
 
-    CHK(pDtlsSession != NULL && pData != NULL && pDataLen != NULL, STATUS_NULL_ARG);
+    CHK(pDtlsSession != NULL && pData != NULL && pData != NULL, STATUS_NULL_ARG);
     CHK(ATOMIC_LOAD_BOOL(&pDtlsSession->isStarted), STATUS_SSL_PACKET_BEFORE_DTLS_READY);
     CHK(!ATOMIC_LOAD_BOOL(&pDtlsSession->shutdown), retStatus);
 
@@ -377,7 +378,7 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
-    INT32 writtenBytes = 0, writeLen = 0;
+    INT32 writtenBytes = 0;
     BOOL locked = FALSE;
     INT32 sslRet;
     BOOL iterate = TRUE;
@@ -389,9 +390,7 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
     locked = TRUE;
 
     while (iterate && writtenBytes < dataLen) {
-        // In Dtls, we need to make sure that the packet is smaller than the mtu or MBEDTLS_SSL_OUT_CONTENT_LEN constant
-        writeLen = MIN(dataLen - writtenBytes, mbedtls_ssl_get_max_out_record_payload(&pDtlsSession->sslCtx));
-        sslRet = mbedtls_ssl_write(&pDtlsSession->sslCtx, pData + writtenBytes, writeLen);
+        sslRet = mbedtls_ssl_write(&pDtlsSession->sslCtx, pData + writtenBytes, dataLen - writtenBytes);
         if (sslRet > 0) {
             writtenBytes += sslRet;
         } else if (sslRet == MBEDTLS_ERR_SSL_WANT_READ || sslRet == MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -410,7 +409,7 @@ CleanUp:
     }
 
     LEAVES();
-    return retStatus;
+    return STATUS_SUCCESS;
 }
 
 STATUS dtlsSessionGetLocalCertificateFingerprint(PDtlsSession pDtlsSession, PCHAR pBuff, UINT32 buffLen)
@@ -472,7 +471,7 @@ STATUS dtlsSessionPopulateKeyingMaterial(PDtlsSession pDtlsSession, PDtlsKeyingM
     BOOL locked = FALSE;
     PTlsKeys pKeys;
     BYTE keyingMaterialBuffer[MAX_SRTP_MASTER_KEY_LEN * 2 + MAX_SRTP_SALT_KEY_LEN * 2];
-    mbedtls_dtls_srtp_info negotiatedSRTPProfile;
+    mbedtls_ssl_srtp_profile negotiatedSRTPProfile;
 
     CHK(pDtlsSession != NULL && pDtlsKeyingMaterial != NULL, STATUS_NULL_ARG);
     pKeys = &pDtlsSession->tlsKeys;
@@ -497,12 +496,12 @@ STATUS dtlsSessionPopulateKeyingMaterial(PDtlsSession pDtlsSession, PDtlsKeyingM
 
     MEMCPY(pDtlsKeyingMaterial->serverWriteKey + MAX_SRTP_MASTER_KEY_LEN, &keyingMaterialBuffer[offset], MAX_SRTP_SALT_KEY_LEN);
 
-    mbedtls_ssl_get_dtls_srtp_negotiation_result(&pDtlsSession->sslCtx, &negotiatedSRTPProfile);
-    switch (negotiatedSRTPProfile.chosen_dtls_srtp_profile) {
-        case MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80:
+    negotiatedSRTPProfile = mbedtls_ssl_get_dtls_srtp_protection_profile(&pDtlsSession->sslCtx);
+    switch (negotiatedSRTPProfile) {
+        case MBEDTLS_SRTP_AES128_CM_HMAC_SHA1_80:
             pDtlsKeyingMaterial->srtpProfile = KVS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
             break;
-        case MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_32:
+        case MBEDTLS_SRTP_AES128_CM_HMAC_SHA1_32:
             pDtlsKeyingMaterial->srtpProfile = KVS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32;
             break;
         default:

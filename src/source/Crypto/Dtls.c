@@ -37,7 +37,7 @@ STATUS dtlsValidateRtcCertificates(PRtcCertificate pRtcCertificates, PUINT32 pCo
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
-    UINT32 i = 0;
+    UINT32 i;
 
     CHK(pRtcCertificates != NULL && pCount != NULL, retStatus);
 
@@ -45,12 +45,9 @@ STATUS dtlsValidateRtcCertificates(PRtcCertificate pRtcCertificates, PUINT32 pCo
         CHK(pRtcCertificates[i].privateKeySize == 0 || pRtcCertificates[i].pPrivateKey != NULL, STATUS_SSL_INVALID_CERTIFICATE_BITS);
     }
 
-CleanUp:
+    *pCount = i;
 
-    // If pRtcCertificates is NULL, default pCount to 0
-    if (pCount != NULL) {
-        *pCount = i;
-    }
+CleanUp:
 
     LEAVES();
     return retStatus;

@@ -16,21 +16,23 @@ else()
   set(CMAKE_MACOSX_RPATH 0)
 endif()
 
+set(EXT_C_FLAGS "-std=c99 -Wno-implicit-function-declaration -Wno-error=type-limits ${CMAKE_C_FLAGS}")
+
 ExternalProject_Add(
   project_libmbedtls
   # TODO: needs to replace this with official mbedTLS release version
-  GIT_REPOSITORY  https://github.com/ARMmbed/mbedtls.git
-  GIT_TAG         868906cd0658ce91ca841af6f09d76846ef86d1b
+  GIT_REPOSITORY  https://github.com/lherman-cs/mbedtls.git
+  GIT_TAG         a2c1a8f75f0478bad0479bbc9eb9ec2a4376c5e6
   PREFIX          ${CMAKE_CURRENT_BINARY_DIR}/build
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=${OPEN_SRC_INSTALL_PREFIX}
     -DUSE_SHARED_MBEDTLS_LIBRARY=${BUILD_SHARED}
     -DCMAKE_BUILD_TYPE=Release
     -DCMAKE_MACOSX_RPATH=${CMAKE_MACOSX_RPATH}
-    -DCMAKE_C_FLAGS=${EX_C_FLAGS}
     -DENABLE_TESTING=OFF
     -DENABLE_PROGRAMS=OFF
-    -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+    -DCMAKE_C_FLAGS=${EXT_C_FLAGS}
+    -DLINK_WITH_PTHREAD=ON
   BUILD_COMMAND   make -j4
   BUILD_ALWAYS    TRUE
   TEST_COMMAND    "")
