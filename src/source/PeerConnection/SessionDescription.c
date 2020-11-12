@@ -189,7 +189,16 @@ STATUS setPayloadTypesFromOffer(PHashTable codecTable, PHashTable rtxTable, PSes
             CHK_STATUS(hashTableContains(codecTable, RTC_CODEC_H264_PROFILE_42E01F_LEVEL_ASYMMETRY_ALLOWED_PACKETIZATION_MODE, &supportCodec));
             if (supportCodec && (end = STRSTR(attributeValue, H264_VALUE)) != NULL) {
                 CHK_STATUS(STRTOUI64(attributeValue, end - 1, 10, &parsedPayloadType));
-                CHK_STATUS(hashTableUpsert(codecTable, RTC_CODEC_H264_PROFILE_42E01F_LEVEL_ASYMMETRY_ALLOWED_PACKETIZATION_MODE, parsedPayloadType));
+                PCHAR fmtp = fmtpForPayloadType(parsedPayloadType, pSessionDescription);
+                if (fmtp != NULL &&
+                    STRSTR(fmtp, "profile-level-id=42e01f") != NULL) {
+                    DLOGV("Payload type %" PRId64 " - found exact fmtp description match %s", parsedPayloadType, fmtp);
+                    CHK_STATUS(hashTableUpsert(codecTable, RTC_CODEC_H264_PROFILE_42E01F_LEVEL_ASYMMETRY_ALLOWED_PACKETIZATION_MODE, parsedPayloadType));
+                } else if (fmtp != NULL) {
+                    DLOGV("Payload type %" PRId64 " - no exact match for fmtp description %s", parsedPayloadType, fmtp);
+                } else {
+                    DLOGV("Payload type %" PRId64 " lacks any fmtp description.", parsedPayloadType);
+                }
             }
 
             CHK_STATUS(hashTableContains(codecTable, RTC_CODEC_OPUS, &supportCodec));
