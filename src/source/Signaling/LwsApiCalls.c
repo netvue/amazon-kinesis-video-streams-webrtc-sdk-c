@@ -988,14 +988,11 @@ STATUS getIceConfigFromChannelInfo(PSignalingClient pSignalingClient, UINT64 tim
     STATUS retStatus = STATUS_SUCCESS;
     UNUSED_PARAM(time);
 
+    CHK(pSignalingClient->pChannelInfo->iceConfigCount > 0, STATUS_NOT_IMPLEMENTED);
+    CHK(!IS_VALID_TIMESTAMP(pSignalingClient->getIceConfigTime), STATUS_NOT_IMPLEMENTED);
+
     MEMSET(&pSignalingClient->iceConfigs, 0x00, MAX_ICE_CONFIG_COUNT * SIZEOF(IceConfigInfo));
     pSignalingClient->iceConfigCount = 0;
-
-    CHK(pSignalingClient->pChannelInfo->iceConfigCount > 0, STATUS_NULL_ARG);
-    CHK(ATOMIC_LOAD(&pSignalingClient->diagnostics.iceRefreshCount) == 0, STATUS_INVALID_OPERATION);
-
-    // Update the diagnostics info on the number of ICE refresh calls
-    ATOMIC_INCREMENT(&pSignalingClient->diagnostics.iceRefreshCount);
 
     uint32_t iceConfigCount = MIN(STATUS_SIGNALING_MAX_ICE_CONFIG_COUNT, pSignalingClient->pChannelInfo->iceConfigCount);
     uint32_t i,j;

@@ -1008,10 +1008,15 @@ STATUS getChannelEndpoint(PSignalingClient pSignalingClient, UINT64 time)
         case SIGNALING_API_CALL_CACHE_TYPE_NONE:
             break;
         case SIGNALING_API_CALL_CACHE_TYPE_PASS_ENDPOINT:
-            if (strlen(pSignalingClient->channelEndpointHttps) != 0 && strlen(pSignalingClient->channelEndpointWss) != 0) {
-                DLOGI("Use external HTTPS endpoint: %s", pSignalingClient->channelEndpointHttps);
-                DLOGI("Use external WSS endpoint: %s", pSignalingClient->channelEndpointWss);
-                apiCall = FALSE;
+            if (strlen(pSignalingClient->channelEndpointHttps) != 0 &&
+                strlen(pSignalingClient->channelEndpointWss) != 0) {
+
+                if (!IS_VALID_TIMESTAMP(pSignalingClient->getEndpointTime)) {
+                    DLOGI("Use external HTTPS endpoint: %s", pSignalingClient->channelEndpointHttps);
+                    DLOGI("Use external WSS endpoint: %s", pSignalingClient->channelEndpointWss);
+                    apiCall = FALSE;
+                    pSignalingClient->getEndpointTime = time;
+                }
                 break;
             }
         case SIGNALING_API_CALL_CACHE_TYPE_DESCRIBE_GETENDPOINT:
