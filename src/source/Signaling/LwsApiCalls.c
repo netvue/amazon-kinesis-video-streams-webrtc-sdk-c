@@ -983,45 +983,6 @@ CleanUp:
     return retStatus;
 }
 
-STATUS getIceConfigFromChannelInfo(PSignalingClient pSignalingClient, UINT64 time) {
-    ENTERS();
-    STATUS retStatus = STATUS_SUCCESS;
-    UNUSED_PARAM(time);
-
-    CHK(pSignalingClient->pChannelInfo->iceConfigCount > 0, STATUS_NOT_IMPLEMENTED);
-    CHK(!IS_VALID_TIMESTAMP(pSignalingClient->getIceConfigTime), STATUS_NOT_IMPLEMENTED);
-
-    MEMSET(&pSignalingClient->iceConfigs, 0x00, MAX_ICE_CONFIG_COUNT * SIZEOF(IceConfigInfo));
-    pSignalingClient->iceConfigCount = 0;
-
-    uint32_t iceConfigCount = MIN(STATUS_SIGNALING_MAX_ICE_CONFIG_COUNT, pSignalingClient->pChannelInfo->iceConfigCount);
-    uint32_t i,j;
-    for (i=0; i<iceConfigCount; i++) {
-        pSignalingClient->iceConfigs[i].version = pSignalingClient->pChannelInfo->pIceConfigs[i]->version;
-        pSignalingClient->iceConfigs[i].ttl = pSignalingClient->pChannelInfo->pIceConfigs[i]->ttl;
-        STRCPY(pSignalingClient->iceConfigs[i].userName, pSignalingClient->pChannelInfo->pIceConfigs[i]->userName);
-        STRCPY(pSignalingClient->iceConfigs[i].password, pSignalingClient->pChannelInfo->pIceConfigs[i]->password);
-        pSignalingClient->iceConfigs[i].uriCount = MIN(STATUS_SIGNALING_MAX_ICE_URI_COUNT, pSignalingClient->pChannelInfo->pIceConfigs[i]->uriCount);
-        for (j = 0; j < pSignalingClient->iceConfigs[i].uriCount; j++) {
-            STRCPY(pSignalingClient->iceConfigs[i].uris[j], pSignalingClient->pChannelInfo->pIceConfigs[i]->uris[j]);
-        }
-    }
-
-
-    // Perform some validation on the ice configuration
-    pSignalingClient->iceConfigCount = iceConfigCount;
-
-    ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
-
-    CHK_STATUS(validateIceConfiguration(pSignalingClient));
-
-
-    CleanUp:
-
-    LEAVES();
-    return retStatus;
-}
-
 STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
 {
     ENTERS();

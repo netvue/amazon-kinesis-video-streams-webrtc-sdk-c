@@ -11,13 +11,13 @@ extern "C" {
 #define MBEDTLS_SSL_DTLS_SRTP
 
 // disable TLS 1.0 and 1.1 as they should be deprecated in major browser vendors
-#undef MBEDTLS_SSL_CBC_RECORD_SPLITTING
-#undef MBEDTLS_SSL_PROTO_TLS1
-#undef MBEDTLS_SSL_PROTO_TLS1_1
+//#undef MBEDTLS_SSL_CBC_RECORD_SPLITTING
+//#undef MBEDTLS_SSL_PROTO_TLS1
+//#undef MBEDTLS_SSL_PROTO_TLS1_1
 
 // disable because they don't comply with AWS security standard
-#undef MBEDTLS_ECP_DP_SECP224K1_ENABLED
-#undef MBEDTLS_ECP_DP_SECP256K1_ENABLED
+//#undef MBEDTLS_ECP_DP_SECP224K1_ENABLED
+//#undef MBEDTLS_ECP_DP_SECP256K1_ENABLED
 
 /**
  * \def MBEDTLS_ENTROPY_HARDWARE_ALT

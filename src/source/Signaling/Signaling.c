@@ -1042,11 +1042,7 @@ STATUS getIceConfig(PSignalingClient pSignalingClient, UINT64 time)
     }
 
     if (STATUS_SUCCEEDED(retStatus)) {
-        retStatus = getIceConfigFromChannelInfo(pSignalingClient, time);
-
-        if (STATUS_FAILED(retStatus)) {
-            retStatus = getIceConfigLws(pSignalingClient, time);
-        }
+        retStatus = getIceConfigLws(pSignalingClient, time);
 
         if (STATUS_SUCCEEDED(retStatus)) {
             pSignalingClient->getIceConfigTime = time;

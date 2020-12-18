@@ -1185,13 +1185,9 @@ typedef struct {
     PCHAR pControlPlaneUrl; //!< Optional fully qualified control plane URL
                             //!< Maximum length is defined by MAX_ARN_LEN+1
 
-    PCHAR pHTTPSEndpoint;
+    PCHAR pHTTPSEndpoint; //!< The HTTP Endpoint passed in from the outside, this attribute is added by Netvue
 
-    PCHAR pWSSEndpoint;
-
-    PIceConfigInfo pIceConfigs[MAX_ICE_CONFIG_COUNT];
-
-    UINT32 iceConfigCount;
+    PCHAR pWSSEndpoint; //!< The WSS Endpoint passed in from the outside, this attribute is added by Netvue
 
     PCHAR pCertPath; //!< Optional certificate path. Maximum length is defined by MAX_PATH_LEN+1
 
