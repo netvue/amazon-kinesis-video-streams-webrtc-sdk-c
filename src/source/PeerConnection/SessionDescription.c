@@ -57,8 +57,7 @@ STATUS deserializeSessionDescriptionInit(PCHAR sessionDescriptionJSON, UINT32 se
     STATUS retStatus = STATUS_SUCCESS;
     jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
     jsmn_parser parser;
-    INT8 i;
-    INT32 j, tokenCount, lineLen;
+    INT32 i, j, tokenCount, lineLen;
     PCHAR curr, next, tail;
 
     CHK(pSessionDescriptionInit != NULL && sessionDescriptionJSON != NULL, STATUS_NULL_ARG);
@@ -622,6 +621,10 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
     SPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue, "%" PRId64 " nack", payloadType);
     attributeCount++;
 
+    STRCPY(pSdpMediaDescription->sdpAttributes[attributeCount].attributeName, "rtcp-fb");
+    SPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue, "%" PRId64 " goog-remb", payloadType);
+    attributeCount++;
+
     if (pKvsPeerConnection->twccExtId != 0) {
         STRCPY(pSdpMediaDescription->sdpAttributes[attributeCount].attributeName, "rtcp-fb");
         SPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue, "%" PRId64 " " TWCC_SDP_ATTR, payloadType);
@@ -787,6 +790,7 @@ STATUS populateSessionDescription(PKvsPeerConnection pKvsPeerConnection, PSessio
     CHAR bundleValue[MAX_SDP_ATTRIBUTE_VALUE_LENGTH], wmsValue[MAX_SDP_ATTRIBUTE_VALUE_LENGTH];
     PCHAR curr = NULL;
     UINT32 i, sizeRemaining;
+    INT32 charsCopied;
 
     CHK(pKvsPeerConnection != NULL && pLocalSessionDescription != NULL && pRemoteSessionDescription != NULL, STATUS_NULL_ARG);
 
@@ -817,7 +821,11 @@ STATUS populateSessionDescription(PKvsPeerConnection pKvsPeerConnection, PSessio
         STRCPY(pLocalSessionDescription->mediaDescriptions[i].sdpConnectionInformation.connectionAddress, "127.0.0.1");
 
         sizeRemaining = MAX_SDP_ATTRIBUTE_VALUE_LENGTH - (curr - pLocalSessionDescription->sdpAttributes[0].attributeValue);
-        curr += SNPRINTF(curr, sizeRemaining, " %d", i);
+        charsCopied = SNPRINTF(curr, sizeRemaining, " %d", i);
+
+        CHK(charsCopied > 0 && (UINT32) charsCopied < sizeRemaining, STATUS_BUFFER_TOO_SMALL);
+
+        curr += charsCopied;
     }
     pLocalSessionDescription->sessionAttributesCount++;
 
@@ -956,8 +964,7 @@ STATUS deserializeRtcIceCandidateInit(PCHAR pJson, UINT32 jsonLen, PRtcIceCandid
     STATUS retStatus = STATUS_SUCCESS;
     jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
     jsmn_parser parser;
-    INT8 i;
-    INT32 tokenCount;
+    INT32 i, tokenCount;
 
     CHK(pRtcIceCandidateInit != NULL && pJson != NULL, STATUS_NULL_ARG);
     MEMSET(pRtcIceCandidateInit->candidate, 0x00, MAX_ICE_CANDIDATE_INIT_CANDIDATE_LEN + 1);

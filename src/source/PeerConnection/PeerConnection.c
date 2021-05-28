@@ -214,13 +214,15 @@ STATUS sendPacketToRtpReceiver(PKvsPeerConnection pKvsPeerConnection, PBYTE pBuf
             delta = transit - pTransceiver->pJitterBuffer->transit;
             pTransceiver->pJitterBuffer->transit = transit;
             pTransceiver->pJitterBuffer->jitter += (1. / 16.) * ((DOUBLE) ABS(delta) - pTransceiver->pJitterBuffer->jitter);
+
+            headerBytesReceived += RTP_HEADER_LEN(pRtpPacket);
+            bytesReceived += pRtpPacket->rawPacketLength - RTP_HEADER_LEN(pRtpPacket);
+
             CHK_STATUS(jitterBufferPush(pTransceiver->pJitterBuffer, pRtpPacket, &discarded));
             if (discarded) {
                 packetsDiscarded++;
             }
             lastPacketReceivedTimestamp = KVS_CONVERT_TIMESCALE(now, HUNDREDS_OF_NANOS_IN_A_SECOND, 1000);
-            headerBytesReceived += RTP_HEADER_LEN(pRtpPacket);
-            bytesReceived += pRtpPacket->rawPacketLength - RTP_HEADER_LEN(pRtpPacket);
             ownedByJitterBuffer = TRUE;
             CHK(FALSE, STATUS_SUCCESS);
         }
@@ -292,7 +294,7 @@ STATUS onFrameReadyFunc(UINT64 customData, UINT16 startIndex, UINT16 endIndex, U
     PRtpPacket pPacket = NULL;
     Frame frame;
     UINT64 hashValue;
-    UINT32 filledSize = 0;
+    UINT32 filledSize = 0, index;
 
     CHK(pTransceiver != NULL, STATUS_NULL_ARG);
 
@@ -308,6 +310,7 @@ STATUS onFrameReadyFunc(UINT64 customData, UINT16 startIndex, UINT16 endIndex, U
     MUTEX_LOCK(pTransceiver->statsLock);
     // https://www.w3.org/TR/webrtc-stats/#dom-rtcinboundrtpstreamstats-jitterbufferdelay
     pTransceiver->inboundStats.jitterBufferDelay += (DOUBLE)(GETTIME() - pPacket->receivedTime) / HUNDREDS_OF_NANOS_IN_A_SECOND;
+    index = pTransceiver->inboundStats.jitterBufferEmittedCount;
     pTransceiver->inboundStats.jitterBufferEmittedCount++;
     if (MEDIA_STREAM_TRACK_KIND_VIDEO == pTransceiver->transceiver.receiver.track.kind) {
         pTransceiver->inboundStats.framesReceived++;
@@ -330,6 +333,7 @@ STATUS onFrameReadyFunc(UINT64 customData, UINT16 startIndex, UINT16 endIndex, U
     frame.frameData = pTransceiver->peerFrameBuffer;
     frame.size = frameSize;
     frame.duration = 0;
+    frame.index = index;
     // TODO: Fill frame flag and track id and index if we need to, currently those are not used by RtcRtpTransceiver
     if (pTransceiver->onFrame != NULL) {
         pTransceiver->onFrame(pTransceiver->onFrameCustomData, &frame);
@@ -394,6 +398,7 @@ VOID onIceConnectionStateChange(UINT64 customData, UINT64 connectionState)
             /* explicit fall-through */
         case ICE_AGENT_STATE_READY:
             /* start dtlsSession as soon as ice is connected */
+            newConnectionState = RTC_PEER_CONNECTION_STATE_CONNECTING;
             startDtlsSession = TRUE;
             break;
 
@@ -712,6 +717,11 @@ STATUS createPeerConnection(PRtcConfiguration pConfiguration, PRtcPeerConnection
 
     NULLABLE_SET_EMPTY(pKvsPeerConnection->canTrickleIce);
 
+    if (!pConfiguration->kvsRtcConfiguration.disableSenderSideBandwidthEstimation) {
+        pKvsPeerConnection->twccLock = MUTEX_CREATE(TRUE);
+        pKvsPeerConnection->pTwccManager = (PTwccManager) MEMCALLOC(1, SIZEOF(TwccManager));
+    }
+
     *ppPeerConnection = (PRtcPeerConnection) pKvsPeerConnection;
 
 CleanUp:
@@ -795,6 +805,16 @@ STATUS freePeerConnection(PRtcPeerConnection* ppPeerConnection)
         timerQueueFree(&pKvsPeerConnection->timerQueueHandle);
     }
 
+    if (pKvsPeerConnection->pTwccManager != NULL) {
+        if (IS_VALID_MUTEX_VALUE(pKvsPeerConnection->twccLock)) {
+            MUTEX_FREE(pKvsPeerConnection->twccLock);
+        }
+        // twccManager.twccPackets contains sequence numbers of packets (as opposed to pointers to actual packets)
+        // we should not deallocate items but we do need to clear the queue
+        CHK_LOG_ERR(stackQueueClear(&pKvsPeerConnection->pTwccManager->twccPackets, FALSE));
+        SAFE_MEMFREE(pKvsPeerConnection->pTwccManager);
+    }
+
     SAFE_MEMFREE(pKvsPeerConnection);
 
     *ppPeerConnection = NULL;
@@ -870,6 +890,32 @@ STATUS peerConnectionOnConnectionStateChange(PRtcPeerConnection pRtcPeerConnecti
 
     pKvsPeerConnection->onConnectionStateChange = rtcOnConnectionStateChange;
     pKvsPeerConnection->onConnectionStateChangeCustomData = customData;
+
+CleanUp:
+
+    if (locked) {
+        MUTEX_UNLOCK(pKvsPeerConnection->peerConnectionObjLock);
+    }
+
+    LEAVES();
+    return retStatus;
+}
+
+STATUS peerConnectionOnSenderBandwidthEstimation(PRtcPeerConnection pRtcPeerConnection, UINT64 customData,
+                                                 RtcOnSenderBandwidthEstimation rtcOnSenderBandwidthEstimation)
+{
+    ENTERS();
+    STATUS retStatus = STATUS_SUCCESS;
+    PKvsPeerConnection pKvsPeerConnection = (PKvsPeerConnection) pRtcPeerConnection;
+    BOOL locked = FALSE;
+
+    CHK(pKvsPeerConnection != NULL && rtcOnSenderBandwidthEstimation != NULL, STATUS_NULL_ARG);
+
+    MUTEX_LOCK(pKvsPeerConnection->peerConnectionObjLock);
+    locked = TRUE;
+
+    pKvsPeerConnection->onSenderBandwidthEstimation = rtcOnSenderBandwidthEstimation;
+    pKvsPeerConnection->onSenderBandwidthEstimationCustomData = customData;
 
 CleanUp:
 
@@ -1345,6 +1391,54 @@ STATUS deinitKvsWebRtc(VOID)
     ATOMIC_STORE_BOOL(&gKvsWebRtcInitialized, FALSE);
 
 CleanUp:
+
+    LEAVES();
+    return retStatus;
+}
+
+STATUS twccManagerOnPacketSent(PKvsPeerConnection pc, PRtpPacket pRtpPacket)
+{
+    ENTERS();
+    STATUS retStatus = STATUS_SUCCESS;
+    BOOL locked = FALSE;
+    UINT64 sn = 0;
+    UINT16 seqNum;
+    BOOL isEmpty = FALSE;
+    INT64 firstTimeKvs, lastLocalTimeKvs, ageOfOldest;
+    CHK(pc != NULL && pRtpPacket != NULL, STATUS_NULL_ARG);
+    CHK(pc->onSenderBandwidthEstimation != NULL && pc->pTwccManager != NULL, STATUS_SUCCESS);
+    CHK(TWCC_EXT_PROFILE == pRtpPacket->header.extensionProfile, STATUS_SUCCESS);
+
+    MUTEX_LOCK(pc->twccLock);
+    locked = TRUE;
+
+    seqNum = TWCC_SEQNUM(pRtpPacket->header.extensionPayload);
+    CHK_STATUS(stackQueueEnqueue(&pc->pTwccManager->twccPackets, seqNum));
+    pc->pTwccManager->twccPacketBySeqNum[seqNum].seqNum = seqNum;
+    pc->pTwccManager->twccPacketBySeqNum[seqNum].packetSize = pRtpPacket->payloadLength;
+    pc->pTwccManager->twccPacketBySeqNum[seqNum].localTimeKvs = pRtpPacket->sentTime;
+    pc->pTwccManager->twccPacketBySeqNum[seqNum].remoteTimeKvs = TWCC_PACKET_LOST_TIME;
+    pc->pTwccManager->lastLocalTimeKvs = pRtpPacket->sentTime;
+
+    // cleanup queue until it contains up to 2 seconds of sent packets
+    do {
+        CHK_STATUS(stackQueuePeek(&pc->pTwccManager->twccPackets, &sn));
+        firstTimeKvs = pc->pTwccManager->twccPacketBySeqNum[(UINT16) sn].localTimeKvs;
+        lastLocalTimeKvs = pRtpPacket->sentTime;
+        ageOfOldest = lastLocalTimeKvs - firstTimeKvs;
+        if (ageOfOldest > TWCC_ESTIMATOR_TIME_WINDOW) {
+            CHK_STATUS(stackQueueDequeue(&pc->pTwccManager->twccPackets, &sn));
+            CHK_STATUS(stackQueueIsEmpty(&pc->pTwccManager->twccPackets, &isEmpty));
+        } else {
+            break;
+        }
+    } while (!isEmpty);
+
+CleanUp:
+    if (locked) {
+        MUTEX_UNLOCK(pc->twccLock);
+    }
+    CHK_LOG_ERR(retStatus);
 
     LEAVES();
     return retStatus;
