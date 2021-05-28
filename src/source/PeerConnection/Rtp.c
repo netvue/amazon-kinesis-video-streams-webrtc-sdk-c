@@ -208,7 +208,7 @@ STATUS writeFrame(PRtcRtpTransceiver pRtcRtpTransceiver, PFrame pFrame)
     UINT32 extpayload;
     STATUS sendStatus;
 
-    CHK(pKvsRtpTransceiver != NULL, STATUS_NULL_ARG);
+    CHK(pKvsRtpTransceiver != NULL && pFrame != NULL, STATUS_NULL_ARG);
     pKvsPeerConnection = pKvsRtpTransceiver->pKvsPeerConnection;
     pPayloadArray = &(pKvsRtpTransceiver->sender.payloadArray);
     if (MEDIA_STREAM_TRACK_KIND_VIDEO == pKvsRtpTransceiver->sender.track.kind) {
@@ -311,6 +311,9 @@ STATUS writeFrame(PRtcRtpTransceiver pRtcRtpTransceiver, PFrame pFrame)
             framesDiscardedOnSend = 1;
             SAFE_MEMFREE(rawPacket);
             continue;
+        } else if (sendStatus == STATUS_SUCCESS && pKvsRtpTransceiver->pKvsPeerConnection->twccExtId != 0) {
+            pRtpPacket->sentTime = GETTIME();
+            twccManagerOnPacketSent(pKvsPeerConnection, pRtpPacket);
         }
         CHK_STATUS(sendStatus);
         if (bufferAfterEncrypt) {

@@ -13,7 +13,7 @@ STATUS dtlsSessionOnOutBoundData(PDtlsSession pDtlsSession, UINT64 customData, D
     MUTEX_UNLOCK(pDtlsSession->sslLock);
 
 CleanUp:
-    return STATUS_SUCCESS;
+    return retStatus;
 }
 
 STATUS dtlsSessionOnStateChange(PDtlsSession pDtlsSession, UINT64 customData, DtlsSessionOnStateChange callbackFn)
@@ -39,7 +39,10 @@ STATUS dtlsValidateRtcCertificates(PRtcCertificate pRtcCertificates, PUINT32 pCo
     STATUS retStatus = STATUS_SUCCESS;
     UINT32 i = 0;
 
-    CHK(pRtcCertificates != NULL && pCount != NULL, retStatus);
+    CHK(pCount != NULL, STATUS_NULL_ARG);
+
+    // No certs have been specified
+    CHK(pRtcCertificates != NULL, retStatus);
 
     for (i = 0, *pCount = 0; pRtcCertificates[i].pCertificate != NULL && i < MAX_RTCCONFIGURATION_CERTIFICATES; i++) {
         CHK(pRtcCertificates[i].privateKeySize == 0 || pRtcCertificates[i].pPrivateKey != NULL, STATUS_SSL_INVALID_CERTIFICATE_BITS);
@@ -71,6 +74,25 @@ STATUS dtlsSessionChangeState(PDtlsSession pDtlsSession, RTC_DTLS_TRANSPORT_STAT
     pDtlsSession->state = newState;
     if (pDtlsSession->dtlsSessionCallbacks.stateChangeFn != NULL) {
         pDtlsSession->dtlsSessionCallbacks.stateChangeFn(pDtlsSession->dtlsSessionCallbacks.stateChangeFnCustomData, newState);
+    }
+
+CleanUp:
+
+    LEAVES();
+    return retStatus;
+}
+
+STATUS dtlsFillPseudoRandomBits(PBYTE pBuf, UINT32 bufSize)
+{
+    ENTERS();
+    STATUS retStatus = STATUS_SUCCESS;
+    UINT32 i;
+
+    CHK(pBuf != NULL, STATUS_NULL_ARG);
+    CHK(bufSize >= DTLS_CERT_MIN_SERIAL_NUM_SIZE && bufSize <= DTLS_CERT_MAX_SERIAL_NUM_SIZE, retStatus);
+
+    for (i = 0; i < bufSize; i++) {
+        *pBuf++ = (BYTE)(RAND() & 0xFF);
     }
 
 CleanUp:

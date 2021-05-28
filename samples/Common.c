@@ -115,7 +115,7 @@ STATUS logSelectedIceCandidatesInformation(PSampleStreamingSession pSampleStream
     rtcMetrics.requestedTypeOfStats = RTC_STATS_TYPE_REMOTE_CANDIDATE;
     CHK_STATUS(rtcPeerConnectionGetMetrics(pSampleStreamingSession->pPeerConnection, NULL, &rtcMetrics));
     DLOGD("Remote Candidate IP Address: %s", rtcMetrics.rtcStatsObject.remoteIceCandidateStats.address);
-    DLOGD("Remote Candidate type: %s", rtcMetrics.rtcStatsObject.localIceCandidateStats.candidateType);
+    DLOGD("Remote Candidate type: %s", rtcMetrics.rtcStatsObject.remoteIceCandidateStats.candidateType);
     DLOGD("Remote Candidate port: %d", rtcMetrics.rtcStatsObject.remoteIceCandidateStats.port);
     DLOGD("Remote Candidate priority: %d", rtcMetrics.rtcStatsObject.remoteIceCandidateStats.priority);
     DLOGD("Remote Candidate transport protocol: %s", rtcMetrics.rtcStatsObject.remoteIceCandidateStats.protocol);
@@ -183,6 +183,7 @@ STATUS handleOffer(PSampleConfiguration pSampleConfiguration, PSampleStreamingSe
     STATUS retStatus = STATUS_SUCCESS;
     RtcSessionDescriptionInit offerSessionDescriptionInit;
     NullableBool canTrickle;
+    BOOL mediaThreadStarted;
 
     CHK(pSampleConfiguration != NULL && pSignalingMessage != NULL, STATUS_NULL_ARG);
 
@@ -207,17 +208,9 @@ STATUS handleOffer(PSampleConfiguration pSampleConfiguration, PSampleStreamingSe
               (GETTIME() - pSampleStreamingSession->offerReceiveTime) / HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
     }
 
-    if (!ATOMIC_LOAD_BOOL(&pSampleConfiguration->mediaThreadStarted)) {
-        ATOMIC_STORE_BOOL(&pSampleConfiguration->mediaThreadStarted, TRUE);
+    mediaThreadStarted = ATOMIC_EXCHANGE_BOOL(&pSampleConfiguration->mediaThreadStarted, TRUE);
+    if (!mediaThreadStarted) {
         THREAD_CREATE(&pSampleConfiguration->mediaSenderTid, mediaSenderRoutine, (PVOID) pSampleConfiguration);
-
-        if ((retStatus = timerQueueAddTimer(pSampleConfiguration->timerQueueHandle, SAMPLE_STATS_DURATION, SAMPLE_STATS_DURATION,
-                                            getIceCandidatePairStatsCallback, (UINT64) pSampleConfiguration,
-                                            &pSampleConfiguration->iceCandidatePairStatsTimerId)) != STATUS_SUCCESS) {
-            DLOGW("Failed to add getIceCandidatePairStatsCallback to add to timer queue (code 0x%08x). Cannot pull ice candidate pair metrics "
-                  "periodically",
-                  retStatus);
-        }
     }
 
     // The audio video receive routine should be per streaming session
@@ -320,12 +313,13 @@ CleanUp:
 
 STATUS initializePeerConnection(PSampleConfiguration pSampleConfiguration, PRtcPeerConnection* ppRtcPeerConnection)
 {
+    ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
     RtcConfiguration configuration;
-    UINT32 i, j, iceConfigCount, uriCount;
+    UINT32 i, j, iceConfigCount, uriCount = 0, maxTurnServer = 1;
     PIceConfigInfo pIceConfigInfo;
-    const UINT32 maxTurnServer = 1;
-    uriCount = 0;
+    UINT64 data, curTime;
+    PRtcCertificate pRtcCertificate = NULL;
 
     CHK(pSampleConfiguration != NULL && ppRtcPeerConnection != NULL, STATUS_NULL_ARG);
 
@@ -370,10 +364,32 @@ STATUS initializePeerConnection(PSampleConfiguration pSampleConfiguration, PRtcP
     }
 
     pSampleConfiguration->iceUriCount = uriCount + 1;
+
+    // Check if we have any pregenerated certs and use them
+    // NOTE: We are running under the config lock
+    retStatus = stackQueueDequeue(pSampleConfiguration->pregeneratedCertificates, &data);
+    CHK(retStatus == STATUS_SUCCESS || retStatus == STATUS_NOT_FOUND, retStatus);
+
+    if (retStatus == STATUS_NOT_FOUND) {
+        retStatus = STATUS_SUCCESS;
+    } else {
+        // Use the pre-generated cert and get rid of it to not reuse again
+        pRtcCertificate = (PRtcCertificate) data;
+        configuration.certificates[0] = *pRtcCertificate;
+    }
+
+    curTime = GETTIME();
     CHK_STATUS(createPeerConnection(&configuration, ppRtcPeerConnection));
+    DLOGD("time taken to create peer connection %" PRIu64 " ms", (GETTIME() - curTime) / HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
 
 CleanUp:
 
+    CHK_LOG_ERR(retStatus);
+
+    // Free the certificate which can be NULL as we no longer need it and won't reuse
+    freeRtcCertificate(pRtcCertificate);
+
+    LEAVES();
     return retStatus;
 }
 
@@ -407,6 +423,8 @@ STATUS createSampleStreamingSession(PSampleConfiguration pSampleConfiguration, P
     STATUS retStatus = STATUS_SUCCESS;
     RtcMediaStreamTrack videoTrack, audioTrack;
     PSampleStreamingSession pSampleStreamingSession = NULL;
+    RtcRtpTransceiverInit audioRtpTransceiverInit;
+    RtcRtpTransceiverInit videoRtpTransceiverInit;
 
     MEMSET(&videoTrack, 0x00, SIZEOF(RtcMediaStreamTrack));
     MEMSET(&audioTrack, 0x00, SIZEOF(RtcMediaStreamTrack));
@@ -448,9 +466,11 @@ STATUS createSampleStreamingSession(PSampleConfiguration pSampleConfiguration, P
     // Add a SendRecv Transceiver of type video
     videoTrack.kind = MEDIA_STREAM_TRACK_KIND_VIDEO;
     videoTrack.codec = RTC_CODEC_H264_PROFILE_42E01F_LEVEL_ASYMMETRY_ALLOWED_PACKETIZATION_MODE;
+    videoRtpTransceiverInit.direction = RTC_RTP_TRANSCEIVER_DIRECTION_SENDRECV;
     STRCPY(videoTrack.streamId, "myKvsVideoStream");
     STRCPY(videoTrack.trackId, "myVideoTrack");
-    CHK_STATUS(addTransceiver(pSampleStreamingSession->pPeerConnection, &videoTrack, NULL, &pSampleStreamingSession->pVideoRtcRtpTransceiver));
+    CHK_STATUS(addTransceiver(pSampleStreamingSession->pPeerConnection, &videoTrack, &videoRtpTransceiverInit,
+                              &pSampleStreamingSession->pVideoRtcRtpTransceiver));
 
     CHK_STATUS(transceiverOnBandwidthEstimation(pSampleStreamingSession->pVideoRtcRtpTransceiver, (UINT64) pSampleStreamingSession,
                                                 sampleBandwidthEstimationHandler));
@@ -458,12 +478,17 @@ STATUS createSampleStreamingSession(PSampleConfiguration pSampleConfiguration, P
     // Add a SendRecv Transceiver of type video
     audioTrack.kind = MEDIA_STREAM_TRACK_KIND_AUDIO;
     audioTrack.codec = RTC_CODEC_OPUS;
+    audioRtpTransceiverInit.direction = RTC_RTP_TRANSCEIVER_DIRECTION_SENDRECV;
     STRCPY(audioTrack.streamId, "myKvsVideoStream");
     STRCPY(audioTrack.trackId, "myAudioTrack");
-    CHK_STATUS(addTransceiver(pSampleStreamingSession->pPeerConnection, &audioTrack, NULL, &pSampleStreamingSession->pAudioRtcRtpTransceiver));
+    CHK_STATUS(addTransceiver(pSampleStreamingSession->pPeerConnection, &audioTrack, &audioRtpTransceiverInit,
+                              &pSampleStreamingSession->pAudioRtcRtpTransceiver));
 
     CHK_STATUS(transceiverOnBandwidthEstimation(pSampleStreamingSession->pAudioRtcRtpTransceiver, (UINT64) pSampleStreamingSession,
                                                 sampleBandwidthEstimationHandler));
+    // twcc bandwidth estimation
+    CHK_STATUS(peerConnectionOnSenderBandwidthEstimation(pSampleStreamingSession->pPeerConnection, (UINT64) pSampleStreamingSession,
+                                                         sampleSenderBandwidthEstimationHandler));
     pSampleStreamingSession->firstFrame = TRUE;
     pSampleStreamingSession->startUpLatency = 0;
 CleanUp:
@@ -484,10 +509,12 @@ STATUS freeSampleStreamingSession(PSampleStreamingSession* ppSampleStreamingSess
 {
     STATUS retStatus = STATUS_SUCCESS;
     PSampleStreamingSession pSampleStreamingSession = NULL;
+    PSampleConfiguration pSampleConfiguration;
 
     CHK(ppSampleStreamingSession != NULL, STATUS_NULL_ARG);
     pSampleStreamingSession = *ppSampleStreamingSession;
-    CHK(pSampleStreamingSession != NULL, retStatus);
+    CHK(pSampleStreamingSession != NULL && pSampleStreamingSession->pSampleConfiguration != NULL, retStatus);
+    pSampleConfiguration = pSampleStreamingSession->pSampleConfiguration;
 
     DLOGD("Freeing streaming session with peer id: %s ", pSampleStreamingSession->peerId);
 
@@ -500,6 +527,18 @@ STATUS freeSampleStreamingSession(PSampleStreamingSession* ppSampleStreamingSess
     if (IS_VALID_TID_VALUE(pSampleStreamingSession->receiveAudioVideoSenderTid)) {
         THREAD_JOIN(pSampleStreamingSession->receiveAudioVideoSenderTid, NULL);
     }
+
+    // De-initialize the session stats timer if there are no active sessions
+    // NOTE: we need to perform this under the lock which might be acquired by
+    // the running thread but it's OK as it's re-entrant
+    MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
+    if (pSampleConfiguration->iceCandidatePairStatsTimerId != MAX_UINT32 && pSampleConfiguration->streamingSessionCount == 0 &&
+        pSampleConfiguration->iceCandidatePairStatsTimerId != MAX_UINT32) {
+        CHK_LOG_ERR(timerQueueCancelTimer(pSampleConfiguration->timerQueueHandle, pSampleConfiguration->iceCandidatePairStatsTimerId,
+                                          (UINT64) pSampleConfiguration));
+        pSampleConfiguration->iceCandidatePairStatsTimerId = MAX_UINT32;
+    }
+    MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
 
     CHK_LOG_ERR(closePeerConnection(pSampleStreamingSession->pPeerConnection));
     CHK_LOG_ERR(freePeerConnection(&pSampleStreamingSession->pPeerConnection));
@@ -543,6 +582,29 @@ VOID sampleBandwidthEstimationHandler(UINT64 customData, DOUBLE maxiumBitrate)
 {
     UNUSED_PARAM(customData);
     DLOGV("received bitrate suggestion: %f", maxiumBitrate);
+}
+
+VOID sampleSenderBandwidthEstimationHandler(UINT64 customData, UINT32 txBytes, UINT32 rxBytes, UINT32 txPacketsCnt, UINT32 rxPacketsCnt,
+                                            UINT64 duration)
+{
+    UNUSED_PARAM(customData);
+    UNUSED_PARAM(duration);
+    UNUSED_PARAM(rxBytes);
+    UNUSED_PARAM(txBytes);
+    UINT32 lostPacketsCnt = txPacketsCnt - rxPacketsCnt;
+    UINT32 percentLost = lostPacketsCnt * 100 / txPacketsCnt;
+    UINT32 bitrate = 1024;
+    if (percentLost < 2) {
+        // increase encoder bitrate by 2 percent
+        bitrate *= 1.02f;
+    } else if (percentLost > 5) {
+        // decrease encoder bitrate by packet loss percent
+        bitrate *= (1.0f - percentLost / 100.0f);
+    }
+    // otherwise keep bitrate the same
+
+    DLOGS("received sender bitrate estimation: suggested bitrate %u sent: %u bytes %u packets received: %u bytes %u packets in %lu msec, ", bitrate,
+          txBytes, txPacketsCnt, rxBytes, rxPacketsCnt, duration / 10000ULL);
 }
 
 STATUS handleRemoteCandidate(PSampleStreamingSession pSampleStreamingSession, PSignalingMessage pSignalingMessage)
@@ -688,6 +750,7 @@ STATUS createSampleConfiguration(PCHAR channelName, SIGNALING_CHANNEL_ROLE_TYPE 
     pSampleConfiguration->clientInfo.loggingLevel = logLevel;
     pSampleConfiguration->clientInfo.cacheFilePath = NULL; // Use the default path
     pSampleConfiguration->iceCandidatePairStatsTimerId = MAX_UINT32;
+    pSampleConfiguration->pregenerateCertTimerId = MAX_UINT32;
 
     ATOMIC_STORE_BOOL(&pSampleConfiguration->interrupted, FALSE);
     ATOMIC_STORE_BOOL(&pSampleConfiguration->mediaThreadStarted, FALSE);
@@ -697,10 +760,18 @@ STATUS createSampleConfiguration(PCHAR channelName, SIGNALING_CHANNEL_ROLE_TYPE 
 
     CHK_STATUS(timerQueueCreate(&pSampleConfiguration->timerQueueHandle));
 
+    CHK_STATUS(stackQueueCreate(&pSampleConfiguration->pregeneratedCertificates));
+
+    // Start the cert pre-gen timer callback
+    if (SAMPLE_PRE_GENERATE_CERT) {
+        CHK_LOG_ERR(retStatus =
+                        timerQueueAddTimer(pSampleConfiguration->timerQueueHandle, 0, SAMPLE_PRE_GENERATE_CERT_PERIOD, pregenerateCertTimerCallback,
+                                           (UINT64) pSampleConfiguration, &pSampleConfiguration->pregenerateCertTimerId));
+    }
+
     pSampleConfiguration->iceUriCount = 0;
 
-    CHK_STATUS(hashTableCreateWithParams(SAMPLE_HASH_TABLE_BUCKET_COUNT, SAMPLE_HASH_TABLE_BUCKET_LENGTH,
-                                         &pSampleConfiguration->pPendingSignalingMessageForRemoteClient));
+    CHK_STATUS(stackQueueCreate(&pSampleConfiguration->pPendingSignalingMessageForRemoteClient));
     CHK_STATUS(hashTableCreateWithParams(SAMPLE_HASH_TABLE_BUCKET_COUNT, SAMPLE_HASH_TABLE_BUCKET_LENGTH,
                                          &pSampleConfiguration->pRtcPeerConnectionForRemoteClient));
 
@@ -746,7 +817,6 @@ STATUS getIceCandidatePairStatsCallback(UINT32 timerId, UINT64 currentTime, UINT
     STATUS retStatus = STATUS_SUCCESS;
     PSampleConfiguration pSampleConfiguration = (PSampleConfiguration) customData;
     UINT32 i;
-    pSampleConfiguration->rtcIceCandidatePairMetrics.requestedTypeOfStats = RTC_STATS_TYPE_CANDIDATE_PAIR;
     UINT64 currentMeasureDuration = 0;
     DOUBLE averagePacketsDiscardedOnSend = 0.0;
     DOUBLE averageNumberOfPacketsSentPerSecond = 0.0;
@@ -756,6 +826,8 @@ STATUS getIceCandidatePairStatsCallback(UINT32 timerId, UINT64 currentTime, UINT
     BOOL locked = FALSE;
 
     CHK_WARN(pSampleConfiguration != NULL, STATUS_NULL_ARG, "[KVS Master] getPeriodicStats(): Passed argument is NULL");
+
+    pSampleConfiguration->rtcIceCandidatePairMetrics.requestedTypeOfStats = RTC_STATS_TYPE_CANDIDATE_PAIR;
 
     // We need to execute this under the object lock due to race conditions that it could pose
     MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
@@ -838,13 +910,50 @@ CleanUp:
     return retStatus;
 }
 
-STATUS freePendingSignalingMessageQueue(UINT64 customData, PHashEntry pHashEntry)
+STATUS pregenerateCertTimerCallback(UINT32 timerId, UINT64 currentTime, UINT64 customData)
 {
-    UNUSED_PARAM(customData);
-    PStackQueue pStackQueue = (PStackQueue) pHashEntry->value;
-    stackQueueClear(pStackQueue, TRUE);
-    stackQueueFree(pStackQueue);
-    return STATUS_SUCCESS;
+    UNUSED_PARAM(timerId);
+    UNUSED_PARAM(currentTime);
+    STATUS retStatus = STATUS_SUCCESS;
+    PSampleConfiguration pSampleConfiguration = (PSampleConfiguration) customData;
+    BOOL locked = FALSE;
+    UINT32 certCount;
+    PRtcCertificate pRtcCertificate = NULL;
+
+    CHK_WARN(pSampleConfiguration != NULL, STATUS_NULL_ARG, "[KVS Master] pregenerateCertTimerCallback(): Passed argument is NULL");
+
+    MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
+    locked = TRUE;
+
+    // Quick check if there is anything that needs to be done.
+    CHK_STATUS(stackQueueGetCount(pSampleConfiguration->pregeneratedCertificates, &certCount));
+    CHK(certCount != MAX_RTCCONFIGURATION_CERTIFICATES, retStatus);
+
+    // Generate the certificate with the keypair
+    CHK_STATUS(createRtcCertificate(&pRtcCertificate));
+
+    // Add to the stack queue
+    CHK_STATUS(stackQueueEnqueue(pSampleConfiguration->pregeneratedCertificates, (UINT64) pRtcCertificate));
+
+    DLOGV("New certificate has been pre-generated and added to the queue");
+
+    // Reset it so it won't be freed on exit
+    pRtcCertificate = NULL;
+
+    MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+    locked = FALSE;
+
+CleanUp:
+
+    if (pRtcCertificate != NULL) {
+        freeRtcCertificate(pRtcCertificate);
+    }
+
+    if (locked) {
+        MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+    }
+
+    return retStatus;
 }
 
 STATUS freeSampleConfiguration(PSampleConfiguration* ppSampleConfiguration)
@@ -853,15 +962,28 @@ STATUS freeSampleConfiguration(PSampleConfiguration* ppSampleConfiguration)
     STATUS retStatus = STATUS_SUCCESS;
     PSampleConfiguration pSampleConfiguration;
     UINT32 i;
+    UINT64 data;
+    StackQueueIterator iterator;
     BOOL locked = FALSE;
 
     CHK(ppSampleConfiguration != NULL, STATUS_NULL_ARG);
     pSampleConfiguration = *ppSampleConfiguration;
 
     CHK(pSampleConfiguration != NULL, retStatus);
-    hashTableIterateEntries(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, (UINT64) NULL, freePendingSignalingMessageQueue);
-    hashTableClear(pSampleConfiguration->pPendingSignalingMessageForRemoteClient);
-    hashTableFree(pSampleConfiguration->pPendingSignalingMessageForRemoteClient);
+
+    if (pSampleConfiguration->pPendingSignalingMessageForRemoteClient != NULL) {
+        // Iterate and free all the pending queues
+        stackQueueGetIterator(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, &iterator);
+        while (IS_VALID_ITERATOR(iterator)) {
+            stackQueueIteratorGetItem(iterator, &data);
+            stackQueueIteratorNext(&iterator);
+            freeMessageQueue((PPendingMessageQueue) data);
+        }
+
+        stackQueueClear(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, FALSE);
+        stackQueueFree(pSampleConfiguration->pPendingSignalingMessageForRemoteClient);
+        pSampleConfiguration->pPendingSignalingMessageForRemoteClient = NULL;
+    }
 
     hashTableClear(pSampleConfiguration->pRtcPeerConnectionForRemoteClient);
     hashTableFree(pSampleConfiguration->pRtcPeerConnectionForRemoteClient);
@@ -909,16 +1031,39 @@ STATUS freeSampleConfiguration(PSampleConfiguration* ppSampleConfiguration)
 
     freeStaticCredentialProvider(&pSampleConfiguration->pCredentialProvider);
 
-    if (pSampleConfiguration->iceCandidatePairStatsTimerId != MAX_UINT32) {
-        retStatus = timerQueueCancelTimer(pSampleConfiguration->timerQueueHandle, pSampleConfiguration->iceCandidatePairStatsTimerId,
-                                          (UINT64) pSampleConfiguration);
-        if (STATUS_FAILED(retStatus)) {
-            DLOGE("Failed to cancel time queue: 0x%08x", retStatus);
-        }
-        pSampleConfiguration->iceCandidatePairStatsTimerId = MAX_UINT32;
-    }
     if (IS_VALID_TIMER_QUEUE_HANDLE(pSampleConfiguration->timerQueueHandle)) {
+        if (pSampleConfiguration->iceCandidatePairStatsTimerId != MAX_UINT32) {
+            retStatus = timerQueueCancelTimer(pSampleConfiguration->timerQueueHandle, pSampleConfiguration->iceCandidatePairStatsTimerId,
+                                              (UINT64) pSampleConfiguration);
+            if (STATUS_FAILED(retStatus)) {
+                DLOGE("Failed to cancel stats timer with: 0x%08x", retStatus);
+            }
+            pSampleConfiguration->iceCandidatePairStatsTimerId = MAX_UINT32;
+        }
+
+        if (pSampleConfiguration->pregenerateCertTimerId != MAX_UINT32) {
+            retStatus = timerQueueCancelTimer(pSampleConfiguration->timerQueueHandle, pSampleConfiguration->pregenerateCertTimerId,
+                                              (UINT64) pSampleConfiguration);
+            if (STATUS_FAILED(retStatus)) {
+                DLOGE("Failed to cancel certificate pre-generation timer with: 0x%08x", retStatus);
+            }
+            pSampleConfiguration->pregenerateCertTimerId = MAX_UINT32;
+        }
+
         timerQueueFree(&pSampleConfiguration->timerQueueHandle);
+    }
+
+    if (pSampleConfiguration->pregeneratedCertificates != NULL) {
+        stackQueueGetIterator(pSampleConfiguration->pregeneratedCertificates, &iterator);
+        while (IS_VALID_ITERATOR(iterator)) {
+            stackQueueIteratorGetItem(iterator, &data);
+            stackQueueIteratorNext(&iterator);
+            freeRtcCertificate((PRtcCertificate) data);
+        }
+
+        CHK_LOG_ERR(stackQueueClear(pSampleConfiguration->pregeneratedCertificates, FALSE));
+        CHK_LOG_ERR(stackQueueFree(pSampleConfiguration->pregeneratedCertificates));
+        pSampleConfiguration->pregeneratedCertificates = NULL;
     }
 
     MEMFREE(*ppSampleConfiguration);
@@ -989,6 +1134,9 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration)
             }
         }
 
+        // Check if any lingering pending message queues
+        CHK_STATUS(removeExpiredMessageQueues(pSampleConfiguration->pPendingSignalingMessageForRemoteClient));
+
         // periodically wake up and clean up terminated streaming session
         CVAR_WAIT(pSampleConfiguration->cvar, pSampleConfiguration->sampleConfigurationObjLock, SAMPLE_SESSION_CLEANUP_WAIT_PERIOD);
         MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
@@ -1007,18 +1155,20 @@ CleanUp:
     return retStatus;
 }
 
-STATUS submitPendingIceCandidate(PStackQueue pPendingMessageQueue, PSampleStreamingSession pSampleStreamingSession)
+STATUS submitPendingIceCandidate(PPendingMessageQueue pPendingMessageQueue, PSampleStreamingSession pSampleStreamingSession)
 {
     STATUS retStatus = STATUS_SUCCESS;
     BOOL noPendingSignalingMessageForClient = FALSE;
     PReceivedSignalingMessage pReceivedSignalingMessage = NULL;
     UINT64 hashValue;
 
+    CHK(pPendingMessageQueue != NULL && pPendingMessageQueue->messageQueue != NULL && pSampleStreamingSession != NULL, STATUS_NULL_ARG);
+
     do {
-        CHK_STATUS(stackQueueIsEmpty(pPendingMessageQueue, &noPendingSignalingMessageForClient));
+        CHK_STATUS(stackQueueIsEmpty(pPendingMessageQueue->messageQueue, &noPendingSignalingMessageForClient));
         if (!noPendingSignalingMessageForClient) {
             hashValue = 0;
-            CHK_STATUS(stackQueueDequeue(pPendingMessageQueue, &hashValue));
+            CHK_STATUS(stackQueueDequeue(pPendingMessageQueue->messageQueue, &hashValue));
             pReceivedSignalingMessage = (PReceivedSignalingMessage) hashValue;
             CHK(pReceivedSignalingMessage != NULL, STATUS_INTERNAL_ERROR);
             if (pReceivedSignalingMessage->signalingMessage.messageType == SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE) {
@@ -1027,7 +1177,8 @@ STATUS submitPendingIceCandidate(PStackQueue pPendingMessageQueue, PSampleStream
             SAFE_MEMFREE(pReceivedSignalingMessage);
         }
     } while (!noPendingSignalingMessageForClient);
-    CHK_STATUS(stackQueueFree(pPendingMessageQueue));
+
+    CHK_STATUS(freeMessageQueue(pPendingMessageQueue));
 
 CleanUp:
 
@@ -1040,11 +1191,10 @@ STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pRe
 {
     STATUS retStatus = STATUS_SUCCESS;
     PSampleConfiguration pSampleConfiguration = (PSampleConfiguration) customData;
-    BOOL peerConnectionFound = FALSE;
-    BOOL locked = TRUE;
+    BOOL peerConnectionFound = FALSE, locked = TRUE, startStats = FALSE;
     UINT32 clientIdHash;
     UINT64 hashValue = 0;
-    PStackQueue pPendingMessageQueue = NULL;
+    PPendingMessageQueue pPendingMessageQueue = NULL;
     PSampleStreamingSession pSampleStreamingSession = NULL;
     PReceivedSignalingMessage pReceivedSignalingMessageCopy = NULL;
 
@@ -1063,14 +1213,25 @@ STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pRe
 
     switch (pReceivedSignalingMessage->signalingMessage.messageType) {
         case SIGNALING_MESSAGE_TYPE_OFFER:
+            // Check if we already have an ongoing master session with the same peer
+            CHK_ERR(!peerConnectionFound, STATUS_INVALID_OPERATION, "Peer connection %s is in progress",
+                    pReceivedSignalingMessage->signalingMessage.peerClientId);
+
             /*
              * Create new streaming session for each offer, then insert the client id and streaming session into
              * pRtcPeerConnectionForRemoteClient for subsequent ice candidate messages. Lastly check if there is
              * any ice candidate messages queued in pPendingSignalingMessageForRemoteClient. If so then submit
              * all of them.
              */
-            if (pSampleConfiguration->streamingSessionCount == SIZEOF(pSampleConfiguration->sampleStreamingSessionList)) {
+            if (pSampleConfiguration->streamingSessionCount == ARRAY_SIZE(pSampleConfiguration->sampleStreamingSessionList)) {
                 DLOGW("Max simultaneous streaming session count reached.");
+
+                // Need to remove the pending queue if any.
+                // This is a simple optimization as the session cleanup will
+                // handle the cleanup of pending message queue after a while
+                CHK_STATUS(getPendingMessageQueueForHash(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, TRUE,
+                                                         &pPendingMessageQueue));
+
                 CHK(FALSE, retStatus);
             }
             CHK_STATUS(createSampleStreamingSession(pSampleConfiguration, pReceivedSignalingMessage->signalingMessage.peerClientId, TRUE,
@@ -1084,16 +1245,16 @@ STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pRe
             CHK_STATUS(hashTablePut(pSampleConfiguration->pRtcPeerConnectionForRemoteClient, clientIdHash, (UINT64) pSampleStreamingSession));
 
             // If there are any ice candidate messages in the queue for this client id, submit them now.
-            if (STATUS_SUCCEEDED(hashTableGet(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, &hashValue))) {
-                pPendingMessageQueue = (PStackQueue) hashValue;
-
+            CHK_STATUS(getPendingMessageQueueForHash(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, TRUE,
+                                                     &pPendingMessageQueue));
+            if (pPendingMessageQueue != NULL) {
                 CHK_STATUS(submitPendingIceCandidate(pPendingMessageQueue, pSampleStreamingSession));
 
                 // NULL the pointer to avoid it being freed in the cleanup
                 pPendingMessageQueue = NULL;
-
-                CHK_STATUS(hashTableRemove(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash));
             }
+
+            startStats = pSampleConfiguration->iceCandidatePairStatsTimerId == MAX_UINT32;
             break;
 
         case SIGNALING_MESSAGE_TYPE_ANSWER:
@@ -1107,16 +1268,14 @@ STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pRe
             CHK_STATUS(handleAnswer(pSampleConfiguration, pSampleStreamingSession, &pReceivedSignalingMessage->signalingMessage));
             CHK_STATUS(hashTablePut(pSampleConfiguration->pRtcPeerConnectionForRemoteClient, clientIdHash, (UINT64) pSampleStreamingSession));
 
-            hashValue = 0;
             // If there are any ice candidate messages in the queue for this client id, submit them now.
-            if (STATUS_SUCCEEDED(hashTableGet(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, &hashValue))) {
-                pPendingMessageQueue = (PStackQueue) hashValue;
+            CHK_STATUS(getPendingMessageQueueForHash(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, TRUE,
+                                                     &pPendingMessageQueue));
+            if (pPendingMessageQueue != NULL) {
                 CHK_STATUS(submitPendingIceCandidate(pPendingMessageQueue, pSampleStreamingSession));
 
                 // NULL the pointer to avoid it being freed in the cleanup
                 pPendingMessageQueue = NULL;
-
-                CHK_STATUS(hashTableRemove(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash));
             }
             break;
 
@@ -1126,21 +1285,18 @@ STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pRe
              * submit the signaling message into the corresponding streaming session.
              */
             if (!peerConnectionFound) {
-                hashValue = 0;
-                if (STATUS_HASH_KEY_NOT_PRESENT ==
-                    hashTableGet(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, &hashValue)) {
-                    CHK_STATUS(stackQueueCreate(&pPendingMessageQueue));
-                    CHK_STATUS(
-                        hashTablePut(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, (UINT64) pPendingMessageQueue));
-                } else {
-                    pPendingMessageQueue = (PStackQueue) hashValue;
+                CHK_STATUS(getPendingMessageQueueForHash(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, FALSE,
+                                                         &pPendingMessageQueue));
+                if (pPendingMessageQueue == NULL) {
+                    CHK_STATUS(createMessageQueue(clientIdHash, &pPendingMessageQueue));
+                    CHK_STATUS(stackQueueEnqueue(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, (UINT64) pPendingMessageQueue));
                 }
 
                 pReceivedSignalingMessageCopy = (PReceivedSignalingMessage) MEMCALLOC(1, SIZEOF(ReceivedSignalingMessage));
 
                 *pReceivedSignalingMessageCopy = *pReceivedSignalingMessage;
 
-                CHK_STATUS(stackQueueEnqueue(pPendingMessageQueue, (UINT64) pReceivedSignalingMessageCopy));
+                CHK_STATUS(stackQueueEnqueue(pPendingMessageQueue->messageQueue, (UINT64) pReceivedSignalingMessageCopy));
 
                 // NULL the pointers to not free any longer
                 pPendingMessageQueue = NULL;
@@ -1155,11 +1311,26 @@ STATUS signalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pRe
             break;
     }
 
+    MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+    locked = FALSE;
+
+    if (startStats &&
+        STATUS_FAILED(retStatus = timerQueueAddTimer(pSampleConfiguration->timerQueueHandle, SAMPLE_STATS_DURATION, SAMPLE_STATS_DURATION,
+                                                     getIceCandidatePairStatsCallback, (UINT64) pSampleConfiguration,
+                                                     &pSampleConfiguration->iceCandidatePairStatsTimerId))) {
+        DLOGW("Failed to add getIceCandidatePairStatsCallback to add to timer queue (code 0x%08x). "
+              "Cannot pull ice candidate pair metrics periodically",
+              retStatus);
+
+        // Reset the returned status
+        retStatus = STATUS_SUCCESS;
+    }
+
 CleanUp:
 
     SAFE_MEMFREE(pReceivedSignalingMessageCopy);
     if (pPendingMessageQueue != NULL) {
-        stackQueueFree(pPendingMessageQueue);
+        freeMessageQueue(pPendingMessageQueue);
     }
 
     if (locked) {
@@ -1167,5 +1338,115 @@ CleanUp:
     }
 
     CHK_LOG_ERR(retStatus);
+    return retStatus;
+}
+
+STATUS createMessageQueue(UINT64 hashValue, PPendingMessageQueue* ppPendingMessageQueue)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    PPendingMessageQueue pPendingMessageQueue = NULL;
+
+    CHK(ppPendingMessageQueue != NULL, STATUS_NULL_ARG);
+
+    CHK(NULL != (pPendingMessageQueue = (PPendingMessageQueue) MEMCALLOC(1, SIZEOF(PendingMessageQueue))), STATUS_NOT_ENOUGH_MEMORY);
+    pPendingMessageQueue->hashValue = hashValue;
+    pPendingMessageQueue->createTime = GETTIME();
+    CHK_STATUS(stackQueueCreate(&pPendingMessageQueue->messageQueue));
+
+CleanUp:
+
+    if (STATUS_FAILED(retStatus) && pPendingMessageQueue != NULL) {
+        freeMessageQueue(pPendingMessageQueue);
+        pPendingMessageQueue = NULL;
+    }
+
+    if (ppPendingMessageQueue != NULL) {
+        *ppPendingMessageQueue = pPendingMessageQueue;
+    }
+
+    return retStatus;
+}
+
+STATUS freeMessageQueue(PPendingMessageQueue pPendingMessageQueue)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+
+    // free is idempotent
+    CHK(pPendingMessageQueue != NULL, retStatus);
+
+    if (pPendingMessageQueue->messageQueue != NULL) {
+        stackQueueClear(pPendingMessageQueue->messageQueue, TRUE);
+        stackQueueFree(pPendingMessageQueue->messageQueue);
+    }
+
+    MEMFREE(pPendingMessageQueue);
+
+CleanUp:
+    return retStatus;
+}
+
+STATUS getPendingMessageQueueForHash(PStackQueue pPendingQueue, UINT64 clientHash, BOOL remove, PPendingMessageQueue* ppPendingMessageQueue)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    PPendingMessageQueue pPendingMessageQueue = NULL;
+    StackQueueIterator iterator;
+    BOOL iterate = TRUE;
+    UINT64 data;
+
+    CHK(pPendingQueue != NULL && ppPendingMessageQueue != NULL, STATUS_NULL_ARG);
+
+    CHK_STATUS(stackQueueGetIterator(pPendingQueue, &iterator));
+    while (iterate && IS_VALID_ITERATOR(iterator)) {
+        CHK_STATUS(stackQueueIteratorGetItem(iterator, &data));
+        CHK_STATUS(stackQueueIteratorNext(&iterator));
+
+        pPendingMessageQueue = (PPendingMessageQueue) data;
+
+        if (clientHash == pPendingMessageQueue->hashValue) {
+            *ppPendingMessageQueue = pPendingMessageQueue;
+            iterate = FALSE;
+
+            // Check if the item needs to be removed
+            if (remove) {
+                // This is OK to do as we are terminating the iterator anyway
+                CHK_STATUS(stackQueueRemoveItem(pPendingQueue, data));
+            }
+        }
+    }
+
+CleanUp:
+
+    return retStatus;
+}
+
+STATUS removeExpiredMessageQueues(PStackQueue pPendingQueue)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    PPendingMessageQueue pPendingMessageQueue = NULL;
+    UINT32 i, count;
+    UINT64 data, curTime;
+
+    CHK(pPendingQueue != NULL, STATUS_NULL_ARG);
+
+    curTime = GETTIME();
+    CHK_STATUS(stackQueueGetCount(pPendingQueue, &count));
+
+    // Dequeue and enqueue in order to not break the iterator while removing an item
+    for (i = 0; i < count; i++) {
+        CHK_STATUS(stackQueueDequeue(pPendingQueue, &data));
+
+        // Check for expiry
+        pPendingMessageQueue = (PPendingMessageQueue) data;
+        if (pPendingMessageQueue->createTime + SAMPLE_PENDING_MESSAGE_CLEANUP_DURATION < curTime) {
+            // Message queue has expired and needs to be freed
+            CHK_STATUS(freeMessageQueue(pPendingMessageQueue));
+        } else {
+            // Enqueue back again as it's still valued
+            CHK_STATUS(stackQueueEnqueue(pPendingQueue, data));
+        }
+    }
+
+CleanUp:
+
     return retStatus;
 }
