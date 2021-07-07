@@ -175,6 +175,15 @@ STATUS createValidateChannelInfo(PChannelInfo pOrigChannelInfo, PChannelInfo* pp
         CHK_STATUS(packageTags(pOrigChannelInfo->tagCount, pOrigChannelInfo->pTags, tagsSize, pChannelInfo->pTags, NULL));
     }
 
+    if (pOrigChannelInfo->pHTTPSEndpoint != NULL) {
+        pChannelInfo->pHTTPSEndpoint = pOrigChannelInfo->pHTTPSEndpoint;
+    }
+
+    if (pOrigChannelInfo->pWSSEndpoint != NULL) {
+        pChannelInfo->pWSSEndpoint = pOrigChannelInfo->pWSSEndpoint;
+    }
+
+
 CleanUp:
 
     if (STATUS_FAILED(retStatus)) {

@@ -842,6 +842,7 @@ typedef enum {
                                                         //!< called once and the
                                                         //!< information will be cached into file
                                                         //!< which will allow the cache to persist next time the signaling client is created.
+    SIGNALING_API_CALL_CACHE_TYPE_PASS_ENDPOINT,
 } SIGNALING_API_CALL_CACHE_TYPE;
 /*!@} */
 
@@ -1181,6 +1182,25 @@ typedef struct {
                                                     //!< being used this value can be NULL or point to an EMPTY_STRING.
 } SignalingClientInfo, *PSignalingClientInfo;
 
+
+/**
+ * @brief ICE configuration information struct
+ *
+ * NOTE: Each ICE configuration has an array of ICE URIs.
+ * The actual URI count is specified in uriCount member.
+ *
+ * NOTE:TTL is given in default which is 100ns duration
+ */
+typedef struct {
+    UINT32 version;                                                  //!< Version of the struct
+    UINT64 ttl;                                                      //!< TTL of the configuration is 100ns
+    UINT32 uriCount;                                                 //!<  Number of Ice URI objects
+    CHAR uris[MAX_ICE_CONFIG_URI_COUNT][MAX_ICE_CONFIG_URI_LEN + 1]; //!< List of Ice server URIs
+    CHAR userName[MAX_ICE_CONFIG_USER_NAME_LEN + 1];                 //!< Username for the server
+    CHAR password[MAX_ICE_CONFIG_CREDENTIAL_LEN + 1];                //!< Password for the server
+} IceConfigInfo, *PIceConfigInfo;
+
+
 /**
  * @brief Contains all signaling channel related information
  */
@@ -1197,6 +1217,10 @@ typedef struct {
 
     PCHAR pControlPlaneUrl; //!< Optional fully qualified control plane URL
                             //!< Maximum length is defined by MAX_ARN_LEN+1
+
+    PCHAR pHTTPSEndpoint; //!< The HTTP Endpoint passed in from the outside, this attribute is added by Netvue
+
+    PCHAR pWSSEndpoint; //!< The WSS Endpoint passed in from the outside, this attribute is added by Netvue
 
     PCHAR pCertPath; //!< Optional certificate path. Maximum length is defined by MAX_PATH_LEN+1
 
@@ -1241,22 +1265,6 @@ typedef struct {
 
 } ChannelInfo, *PChannelInfo;
 
-/**
- * @brief ICE configuration information struct
- *
- * NOTE: Each ICE configuration has an array of ICE URIs.
- * The actual URI count is specified in uriCount member.
- *
- * NOTE:TTL is given in default which is 100ns duration
- */
-typedef struct {
-    UINT32 version;                                                  //!< Version of the struct
-    UINT64 ttl;                                                      //!< TTL of the configuration is 100ns
-    UINT32 uriCount;                                                 //!<  Number of Ice URI objects
-    CHAR uris[MAX_ICE_CONFIG_URI_COUNT][MAX_ICE_CONFIG_URI_LEN + 1]; //!< List of Ice server URIs
-    CHAR userName[MAX_ICE_CONFIG_USER_NAME_LEN + 1];                 //!< Username for the server
-    CHAR password[MAX_ICE_CONFIG_CREDENTIAL_LEN + 1];                //!< Password for the server
-} IceConfigInfo, *PIceConfigInfo;
 /*!@} */
 
 /*! \addtogroup Callbacks

@@ -116,7 +116,6 @@ if(BUILD_DEPENDENCIES)
   set(BUILD_ARGS -DBUILD_STATIC_LIBS=${BUILD_STATIC_LIBS}
                  -DOPENSSL_DIR=${OPEN_SRC_INSTALL_PREFIX}
                  -DUSE_OPENSSL=${USE_OPENSSL}
-                 -DUSE_MBEDTLS=${USE_MBEDTLS}
                  -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS})
   build_dependency(websockets ${BUILD_ARGS})
 
@@ -282,6 +281,7 @@ target_link_libraries(
   kvsWebrtcClient
   PRIVATE kvspicUtils
           kvspicState
+          m
           ${CMAKE_THREAD_LIBS_INIT}
           ${OPENSSL_SSL_LIBRARY}
           ${OPENSSL_CRYPTO_LIBRARY}
